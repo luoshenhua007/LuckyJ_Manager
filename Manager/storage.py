@@ -1,0 +1,432 @@
+"""LuckyJ_Manager 数据层。
+
+负责 .json 何切文件的读写、截图复制重命名、tag 仓库维护与复习进度管理。
+
+目录结构：
+    Files/
+    ├── tag.txt
+    ├── <牌谱序号>/
+    │   ├── <何切序号>/
+    │   │   ├── <何切序号>.json
+    │   │   ├── <何切序号>_WhatCut.png
+    │   │   └── <何切序号>_AI.png
+    │   └── ...
+    └── ...
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+MASTERED = 3
+"""复习进度达到该值表示「不再复习」。"""
+
+
+def get_base_dir() -> Path:
+    """返回项目根目录（包含 Files/ 的目录）。
+
+    打包成 exe 后以 exe 所在目录为准，否则以本文件的上上级目录为准。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def parse_tags(text: str) -> list[str]:
+    """把用户输入拆成去重后的标签列表。"""
+    parts = re.split(r"[,，;；\s]+", text.strip())
+    return _dedupe([p for p in parts if p])
+
+
+def _dedupe(items) -> list[str]:
+    result: list[str] = []
+    for item in items:
+        if item and item not in result:
+            result.append(item)
+    return result
+
+
+@dataclass
+class Scene:
+    """一道何切题目。"""
+
+    game_id: int
+    cut_id: int
+    ai_link: str = ""
+    ai_link2: str = ""
+    tags: list[str] = field(default_factory=list)
+    progress: int = 0
+    paifu_link: str = ""
+    comment: str = ""
+    whatcut_img: str | None = None
+    ai_img: str = ""
+    ai_img2: str = ""
+    folder: Path | None = None
+
+    # ---- 路径 ----
+    @property
+    def json_path(self) -> Path | None:
+        if self.folder is None:
+            return None
+        return self.folder / f"{self.cut_id}.json"
+
+    def _image_path(self, name: str | None) -> Path | None:
+        if not name or self.folder is None:
+            return None
+        path = self.folder / name
+        return path if path.exists() else None
+
+    @property
+    def whatcut_path(self) -> Path | None:
+        return self._image_path(self.whatcut_img)
+
+    @property
+    def ai_path(self) -> Path | None:
+        return self._image_path(self.ai_img)
+
+    @property
+    def ai2_path(self) -> Path | None:
+        return self._image_path(self.ai_img2)
+
+    @property
+    def review_path(self) -> Path | None:
+        """复习时展示的图片：优先何切模式截图，否则 AI 权重截图。"""
+        return self.whatcut_path or self.ai_path
+
+    @property
+    def title(self) -> str:
+        return f"#{self.game_id}-{self.cut_id}"
+
+    @property
+    def mastered(self) -> bool:
+        return self.progress >= MASTERED
+
+    # ---- 序列化 ----
+    @classmethod
+    def from_file(cls, json_path: Path) -> "Scene":
+        json_path = Path(json_path)
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        folder = json_path.parent
+        cut_id = _to_int(data.get("何切序号"), folder.name)
+        game_id = _to_int(data.get("序号"), folder.parent.name)
+        progress = _to_int(data.get("复习进度"), 0)
+        return cls(
+            game_id=game_id,
+            cut_id=cut_id,
+            ai_link=data.get("AI复盘链接", "") or "",
+            ai_link2=data.get("参考AI复盘链接", "") or "",
+            tags=list(data.get("标签", []) or []),
+            progress=progress,
+            paifu_link=data.get("原牌谱链接", "") or "",
+            comment=data.get("文字解读", "") or "",
+            whatcut_img=data.get("何切模式截图") or None,
+            ai_img=data.get("AI权重截图", "") or "",
+            ai_img2=data.get("参考AI权重截图", "") or "",
+            folder=folder,
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "序号": self.game_id,
+            "何切序号": self.cut_id,
+            "原牌谱链接": self.paifu_link,
+            "AI复盘链接": self.ai_link,
+            "参考AI复盘链接": self.ai_link2,
+            "何切模式截图": self.whatcut_img,
+            "AI权重截图": self.ai_img,
+            "参考AI权重截图": self.ai_img2,
+            "标签": self.tags,
+            "文字解读": self.comment,
+            "复习进度": self.progress,
+        }
+
+    def save(self, json_path: Path | None = None) -> None:
+        path = Path(json_path) if json_path is not None else self.json_path
+        if path is None:
+            raise ValueError("Scene 没有关联的 json 路径。")
+        path.write_text(
+            json.dumps(self.to_dict(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+
+def _to_int(value, default) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(default)
+        except (TypeError, ValueError):
+            return 0
+
+
+class Storage:
+    """Files/ 目录的访问入口。"""
+
+    def __init__(self, base_dir: Path | None = None):
+        self.base_dir = Path(base_dir) if base_dir else get_base_dir()
+        self.files_dir = self.base_dir / "Files"
+        self.tag_file = self.files_dir / "tag.txt"
+        self.files_dir.mkdir(parents=True, exist_ok=True)
+        if not self.tag_file.exists():
+            self.tag_file.write_text("", encoding="utf-8")
+
+    # ---- 读取 ----
+    def list_scenes(self) -> list[Scene]:
+        scenes: list[Scene] = []
+        for json_path in self.files_dir.glob("*/*/*.json"):
+            try:
+                scenes.append(Scene.from_file(json_path))
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+        scenes.sort(key=lambda s: (s.game_id, s.cut_id))
+        return scenes
+
+    def find_scenes(self, query: str) -> list[Scene]:
+        """按标签查找，多个标签之间为「且」关系，支持子串匹配。"""
+        wanted = [t.lower() for t in parse_tags(query)]
+        if not wanted:
+            return self.list_scenes()
+        result = []
+        for scene in self.list_scenes():
+            lowered = [t.lower() for t in scene.tags]
+            if all(any(w in tag for tag in lowered) for w in wanted):
+                result.append(scene)
+        return result
+
+    # ---- 写入 ----
+    def next_cut_id(self, game_id: int) -> int:
+        game_dir = self.files_dir / str(game_id)
+        if not game_dir.exists():
+            return 1
+        ids = [int(d.name) for d in game_dir.iterdir() if d.is_dir() and d.name.isdigit()]
+        return max(ids, default=0) + 1
+
+    def create_scene(
+        self,
+        game_id: int,
+        ai_link: str,
+        tags: list[str],
+        ai_img_src: str | Path | None,
+        whatcut_img_src: str | Path | None = None,
+        paifu_link: str = "",
+        comment: str = "",
+        ai_link2: str = "",
+        ai_img2_src: str | Path | None = None,
+    ) -> Scene:
+        cut_id = self.next_cut_id(game_id)
+        folder = self.files_dir / str(game_id) / str(cut_id)
+        folder.mkdir(parents=True, exist_ok=True)
+
+        ai_name = self._copy_image(ai_img_src, folder, f"{cut_id}_AI")
+        ai2_name = self._copy_image(ai_img2_src, folder, f"{cut_id}_AI2")
+        whatcut_name = self._copy_image(whatcut_img_src, folder, f"{cut_id}_WhatCut")
+
+        scene = Scene(
+            game_id=game_id,
+            cut_id=cut_id,
+            ai_link=ai_link,
+            ai_link2=ai_link2,
+            tags=list(tags),
+            progress=0,
+            paifu_link=paifu_link,
+            comment=comment,
+            whatcut_img=whatcut_name,
+            ai_img=ai_name or "",
+            ai_img2=ai2_name or "",
+            folder=folder,
+        )
+        scene.save()
+        self.add_tags(tags)
+        return scene
+
+    def update_progress(self, scene: Scene, progress: int) -> None:
+        scene.progress = max(0, min(MASTERED, progress))
+        scene.save()
+
+    @staticmethod
+    def _copy_image(src, folder: Path, stem: str) -> str | None:
+        """把截图复制到 folder 并统一转换为 <stem>.png。"""
+        if not src:
+            return None
+        src_path = Path(src)
+        if not src_path.exists():
+            return None
+        name = f"{stem}.png"
+        dst = folder / name
+        try:
+            from PIL import Image
+
+            with Image.open(src_path) as image:
+                if image.mode not in ("RGB", "RGBA", "L", "LA"):
+                    image = image.convert("RGBA")
+                image.save(dst, "PNG")
+            return name
+        except ImportError:
+            # 没有 Pillow 时退化为按原扩展名复制。
+            ext = src_path.suffix.lower() or ".png"
+            name = f"{stem}{ext}"
+            shutil.copyfile(src_path, folder / name)
+            return name
+
+    @staticmethod
+    def _remove_file(path) -> None:
+        if path is None:
+            return
+        try:
+            Path(path).unlink()
+        except OSError:
+            pass
+
+    @staticmethod
+    def _find_image(folder: Path, stem: str) -> str | None:
+        if folder is None or not folder.exists():
+            return None
+        for path in folder.iterdir():
+            if path.is_file() and path.stem == stem:
+                return path.name
+        return None
+
+    def update_scene(
+        self,
+        scene: Scene,
+        *,
+        game_id: int | None = None,
+        ai_link: str | None = None,
+        ai_link2: str | None = None,
+        tags: list[str] | None = None,
+        paifu_link: str | None = None,
+        comment: str | None = None,
+        ai_img_src=None,
+        ai_img2_src=None,
+        whatcut_img_src=None,
+        remove_whatcut: bool = False,
+        remove_ai2: bool = False,
+    ) -> Scene:
+        folder = scene.folder
+        if folder is None:
+            raise ValueError("Scene 没有关联的目录。")
+
+        if game_id is not None and int(game_id) != scene.game_id:
+            new_game = int(game_id)
+            new_cut = self.next_cut_id(new_game)
+            dest = self.files_dir / str(new_game) / str(new_cut)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            old_game_dir = folder.parent
+            shutil.move(str(folder), str(dest))
+            self._cleanup_empty(old_game_dir)
+            folder = dest
+            if new_cut != scene.cut_id:
+                old_cut = scene.cut_id
+                for path in list(folder.iterdir()):
+                    if path.name.startswith(str(old_cut)):
+                        path.rename(folder / (str(new_cut) + path.name[len(str(old_cut)):]))
+            scene.folder = folder
+            scene.game_id = new_game
+            scene.cut_id = new_cut
+            scene.ai_img = self._find_image(folder, f"{new_cut}_AI") or scene.ai_img
+            scene.ai_img2 = self._find_image(folder, f"{new_cut}_AI2") or scene.ai_img2
+            scene.whatcut_img = self._find_image(folder, f"{new_cut}_WhatCut")
+
+        if ai_link is not None:
+            scene.ai_link = ai_link
+        if ai_link2 is not None:
+            scene.ai_link2 = ai_link2
+        if tags is not None:
+            scene.tags = list(tags)
+        if paifu_link is not None:
+            scene.paifu_link = paifu_link
+        if comment is not None:
+            scene.comment = comment
+
+        if ai_img_src:
+            self._remove_file(folder / scene.ai_img if scene.ai_img else None)
+            new_name = self._copy_image(ai_img_src, folder, f"{scene.cut_id}_AI")
+            if new_name:
+                scene.ai_img = new_name
+        if remove_ai2:
+            if scene.ai_img2:
+                self._remove_file(folder / scene.ai_img2)
+            scene.ai_img2 = ""
+        elif ai_img2_src:
+            if scene.ai_img2:
+                self._remove_file(folder / scene.ai_img2)
+            scene.ai_img2 = self._copy_image(
+                ai_img2_src, folder, f"{scene.cut_id}_AI2"
+            ) or ""
+        if remove_whatcut:
+            if scene.whatcut_img:
+                self._remove_file(folder / scene.whatcut_img)
+            scene.whatcut_img = None
+        elif whatcut_img_src:
+            if scene.whatcut_img:
+                self._remove_file(folder / scene.whatcut_img)
+            scene.whatcut_img = self._copy_image(
+                whatcut_img_src, folder, f"{scene.cut_id}_WhatCut"
+            )
+
+        expected = folder / f"{scene.cut_id}.json"
+        for stale in folder.glob("*.json"):
+            if stale != expected:
+                self._remove_file(stale)
+        scene.save(expected)
+        self.add_tags(scene.tags)
+        return scene
+
+    def delete_scene(self, scene: Scene) -> None:
+        folder = scene.folder
+        if folder is None or not folder.exists():
+            return
+        parent = folder.parent
+        shutil.rmtree(folder)
+        self._cleanup_empty(parent)
+
+    @staticmethod
+    def _cleanup_empty(folder: Path) -> None:
+        try:
+            if folder.exists() and not any(folder.iterdir()):
+                folder.rmdir()
+        except OSError:
+            pass
+
+    # ---- tag 仓库 ----
+    def get_all_tags(self) -> list[str]:
+        if not self.tag_file.exists():
+            return []
+        text = self.tag_file.read_text(encoding="utf-8")
+        return [line.strip() for line in text.splitlines() if line.strip()]
+
+    def add_tags(self, tags) -> None:
+        existing = self.get_all_tags()
+        for tag in tags:
+            if tag and tag not in existing:
+                existing.append(tag)
+        self._write_tags(existing)
+
+    def rename_tag(self, old: str, new: str) -> None:
+        if not old or not new or old == new:
+            return
+        for scene in self.list_scenes():
+            if old in scene.tags:
+                scene.tags = _dedupe([new if t == old else t for t in scene.tags])
+                scene.save()
+        self._write_tags([new if t == old else t for t in self.get_all_tags()])
+
+    def delete_tag(self, tag: str) -> None:
+        if not tag:
+            return
+        for scene in self.list_scenes():
+            if tag in scene.tags:
+                scene.tags = [t for t in scene.tags if t != tag]
+                scene.save()
+        self._write_tags([t for t in self.get_all_tags() if t != tag])
+
+    def _write_tags(self, tags) -> None:
+        cleaned = _dedupe([t for t in tags if t])
+        text = "\n".join(cleaned) + ("\n" if cleaned else "")
+        self.tag_file.write_text(text, encoding="utf-8")

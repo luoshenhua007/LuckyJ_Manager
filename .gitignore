@@ -1,0 +1,12 @@
+# AI 工作日志，不入库
+WorkLog.md
+
+# 牌谱数据文件夹，不入库（保持干净目录给别人）
+Files/*/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# IDE
+.idea/
