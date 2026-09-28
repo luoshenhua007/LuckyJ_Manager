@@ -1,8 +1,8 @@
 # AI 工作日志，不入库
 WorkLog.md
 
-# 牌谱数据文件夹，不入库（保持干净目录给别人）
-Files/*/
+# 牌谱数据与 tag 仓库不入库（保持干净目录给别人，tag.txt 由程序首次运行自动创建）
+Files/*
 
 # Python 缓存
 __pycache__/
