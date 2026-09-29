@@ -60,6 +60,7 @@ class Scene:
     ai_link: str = ""
     ai_link2: str = ""
     tags: list[str] = field(default_factory=list)
+    tags2: list[str] = field(default_factory=list)
     progress: int = 0
     paifu_link: str = ""
     comment: str = ""
@@ -67,6 +68,10 @@ class Scene:
     ai_img: str = ""
     ai_img2: str = ""
     folder: Path | None = None
+    match_score: int = 0
+    """查找时的匹配得分（命中的输入标签数，不写入 json）。"""
+    match_total: int = 0
+    """查找时的总命中数（主要+次要，不写入 json）。"""
 
     # ---- 路径 ----
     @property
@@ -121,6 +126,7 @@ class Scene:
             ai_link=data.get("AI复盘链接", "") or "",
             ai_link2=data.get("参考AI复盘链接", "") or "",
             tags=list(data.get("标签", []) or []),
+            tags2=list(data.get("次要标签", []) or []),
             progress=progress,
             paifu_link=data.get("原牌谱链接", "") or "",
             comment=data.get("文字解读", "") or "",
@@ -141,6 +147,7 @@ class Scene:
             "AI权重截图": self.ai_img,
             "参考AI权重截图": self.ai_img2,
             "标签": self.tags,
+            "次要标签": self.tags2,
             "文字解读": self.comment,
             "复习进度": self.progress,
         }
@@ -165,16 +172,58 @@ def _to_int(value, default) -> int:
             return 0
 
 
+@dataclass
+class Question:
+    """一条疑问记录（不参与复习）。"""
+
+    qid: int
+    game_id: int
+    small_round: str = ""
+    note: str = ""
+    paifu_link: str = ""
+    ai_link: str = ""
+    ai_link2: str = ""
+
+    @property
+    def title(self) -> str:
+        return f"#{self.game_id} {self.small_round}".strip()
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Question":
+        return cls(
+            qid=_to_int(data.get("id"), 0),
+            game_id=_to_int(data.get("序号"), 0),
+            small_round=str(data.get("小局", "") or ""),
+            note=str(data.get("疑问点", "") or ""),
+            paifu_link=str(data.get("原牌谱链接", "") or ""),
+            ai_link=str(data.get("AI复盘链接", "") or ""),
+            ai_link2=str(data.get("参考AI复盘链接", "") or ""),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.qid,
+            "序号": self.game_id,
+            "小局": self.small_round,
+            "疑问点": self.note,
+            "原牌谱链接": self.paifu_link,
+            "AI复盘链接": self.ai_link,
+            "参考AI复盘链接": self.ai_link2,
+        }
+
+
 class Storage:
     """Files/ 目录的访问入口。"""
 
     def __init__(self, base_dir: Path | None = None):
         self.base_dir = Path(base_dir) if base_dir else get_base_dir()
         self.files_dir = self.base_dir / "Files"
-        self.tag_file = self.files_dir / "tag.txt"
+        self.tag_file = self.files_dir / "tags.json"
+        self.question_file = self.files_dir / "questions.json"
+        self.state_file = self.files_dir / "last.json"
         self.files_dir.mkdir(parents=True, exist_ok=True)
         if not self.tag_file.exists():
-            self.tag_file.write_text("", encoding="utf-8")
+            self.tag_file.write_text("[]\n", encoding="utf-8")
 
     # ---- 读取 ----
     def list_scenes(self) -> list[Scene]:
@@ -187,17 +236,52 @@ class Storage:
         scenes.sort(key=lambda s: (s.game_id, s.cut_id))
         return scenes
 
-    def find_scenes(self, query: str) -> list[Scene]:
-        """按标签查找，多个标签之间为「且」关系，支持子串匹配。"""
+    def find_scenes(self, query: str, mode: str = "strict") -> list[Scene]:
+        """按标签查找。
+
+        mode：
+          - "strict"  严格匹配：必须命中全部输入标签（主要+次要标签）。
+          - "primary" 尽量匹配主标签：按命中主要标签的数量从多到少排序。
+          - "any"     尽量匹配标签：按命中（主要+次要）标签的数量从多到少排序。
+
+        标签匹配为子串、忽略大小写；输入多个标签用空格/逗号分隔。
+        """
         wanted = [t.lower() for t in parse_tags(query)]
+        scenes = self.list_scenes()
         if not wanted:
-            return self.list_scenes()
-        result = []
-        for scene in self.list_scenes():
-            lowered = [t.lower() for t in scene.tags]
-            if all(any(w in tag for tag in lowered) for w in wanted):
-                result.append(scene)
-        return result
+            for scene in scenes:
+                scene.match_score = 0
+            return scenes
+
+        results: list[Scene] = []
+        for scene in scenes:
+            prim = [t.lower() for t in scene.tags]
+            both = prim + [t.lower() for t in scene.tags2]
+            primary_hits = sum(1 for w in wanted if any(w in tag for tag in prim))
+            total_hits = sum(1 for w in wanted if any(w in tag for tag in both))
+            scene.match_total = total_hits
+            if mode == "strict":
+                if total_hits == len(wanted):
+                    scene.match_score = total_hits
+                    results.append(scene)
+            elif mode == "primary":
+                if total_hits >= 1:
+                    scene.match_score = primary_hits
+                    results.append(scene)
+            else:  # "any"
+                if total_hits >= 1:
+                    scene.match_score = total_hits
+                    results.append(scene)
+
+        if mode == "strict":
+            results.sort(key=lambda s: (s.game_id, s.cut_id))
+        elif mode == "primary":
+            results.sort(
+                key=lambda s: (-s.match_score, -s.match_total, s.game_id, s.cut_id)
+            )
+        else:
+            results.sort(key=lambda s: (-s.match_score, s.game_id, s.cut_id))
+        return results
 
     # ---- 写入 ----
     def next_cut_id(self, game_id: int) -> int:
@@ -218,6 +302,7 @@ class Storage:
         comment: str = "",
         ai_link2: str = "",
         ai_img2_src: str | Path | None = None,
+        tags2: list[str] | None = None,
     ) -> Scene:
         cut_id = self.next_cut_id(game_id)
         folder = self.files_dir / str(game_id) / str(cut_id)
@@ -233,6 +318,7 @@ class Storage:
             ai_link=ai_link,
             ai_link2=ai_link2,
             tags=list(tags),
+            tags2=list(tags2 or []),
             progress=0,
             paifu_link=paifu_link,
             comment=comment,
@@ -242,8 +328,36 @@ class Storage:
             folder=folder,
         )
         scene.save()
-        self.add_tags(tags)
+        self.add_tags(list(tags) + list(tags2 or []))
+        self.set_last_game(game_id, paifu_link, ai_link, ai_link2)
         return scene
+
+    # ---- 上次录入的牌谱（方便恢复序号） ----
+    def get_last_game(self) -> dict:
+        if not self.state_file.exists():
+            return {}
+        try:
+            data = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def set_last_game(
+        self,
+        game_id: int,
+        paifu_link: str = "",
+        ai_link: str = "",
+        ai_link2: str = "",
+    ) -> None:
+        data = {
+            "序号": int(game_id),
+            "原牌谱链接": paifu_link or "",
+            "AI复盘链接": ai_link or "",
+            "参考AI复盘链接": ai_link2 or "",
+        }
+        self.state_file.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
 
     def update_progress(self, scene: Scene, progress: int) -> None:
         scene.progress = max(0, min(MASTERED, progress))
@@ -300,6 +414,7 @@ class Storage:
         ai_link: str | None = None,
         ai_link2: str | None = None,
         tags: list[str] | None = None,
+        tags2: list[str] | None = None,
         paifu_link: str | None = None,
         comment: str | None = None,
         ai_img_src=None,
@@ -339,6 +454,8 @@ class Storage:
             scene.ai_link2 = ai_link2
         if tags is not None:
             scene.tags = list(tags)
+        if tags2 is not None:
+            scene.tags2 = list(tags2)
         if paifu_link is not None:
             scene.paifu_link = paifu_link
         if comment is not None:
@@ -375,7 +492,7 @@ class Storage:
             if stale != expected:
                 self._remove_file(stale)
         scene.save(expected)
-        self.add_tags(scene.tags)
+        self.add_tags(list(scene.tags) + list(scene.tags2))
         return scene
 
     def delete_scene(self, scene: Scene) -> None:
@@ -398,8 +515,13 @@ class Storage:
     def get_all_tags(self) -> list[str]:
         if not self.tag_file.exists():
             return []
-        text = self.tag_file.read_text(encoding="utf-8")
-        return [line.strip() for line in text.splitlines() if line.strip()]
+        try:
+            data = json.loads(self.tag_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(data, list):
+            return []
+        return _dedupe([str(t) for t in data if str(t)])
 
     def add_tags(self, tags) -> None:
         existing = self.get_all_tags()
@@ -408,12 +530,56 @@ class Storage:
                 existing.append(tag)
         self._write_tags(existing)
 
+    def tag_counts(self) -> dict[str, int]:
+        """统计每个标签被多少道何切使用（主/次要标签合计，动态统计）。"""
+        counts: dict[str, int] = {}
+        for scene in self.list_scenes():
+            for tag in list(scene.tags) + list(scene.tags2):
+                counts[tag] = counts.get(tag, 0) + 1
+        return counts
+
+    @staticmethod
+    def _merge_tag_list(tags, sources, target) -> tuple[list[str], bool]:
+        changed = False
+        result: list[str] = []
+        for tag in tags:
+            merged = target if tag in sources else tag
+            if merged != tag:
+                changed = True
+            if merged not in result:
+                result.append(merged)
+        return result, changed
+
+    def merge_tags(self, sources, target: str) -> None:
+        """把 sources 中的标签全部合并为 target（用于消除重复/相近标签）。"""
+        if not target:
+            return
+        sources = [s for s in _dedupe(list(sources)) if s and s != target]
+        if not sources:
+            return
+        for scene in self.list_scenes():
+            tags, changed1 = self._merge_tag_list(scene.tags, sources, target)
+            tags2, changed2 = self._merge_tag_list(scene.tags2, sources, target)
+            if changed1 or changed2:
+                scene.tags = tags
+                scene.tags2 = tags2
+                scene.save()
+        remaining = [t for t in self.get_all_tags() if t not in sources and t != target]
+        remaining.append(target)
+        self._write_tags(remaining)
+
     def rename_tag(self, old: str, new: str) -> None:
         if not old or not new or old == new:
             return
         for scene in self.list_scenes():
+            changed = False
             if old in scene.tags:
                 scene.tags = _dedupe([new if t == old else t for t in scene.tags])
+                changed = True
+            if old in scene.tags2:
+                scene.tags2 = _dedupe([new if t == old else t for t in scene.tags2])
+                changed = True
+            if changed:
                 scene.save()
         self._write_tags([new if t == old else t for t in self.get_all_tags()])
 
@@ -421,12 +587,82 @@ class Storage:
         if not tag:
             return
         for scene in self.list_scenes():
+            changed = False
             if tag in scene.tags:
                 scene.tags = [t for t in scene.tags if t != tag]
+                changed = True
+            if tag in scene.tags2:
+                scene.tags2 = [t for t in scene.tags2 if t != tag]
+                changed = True
+            if changed:
                 scene.save()
         self._write_tags([t for t in self.get_all_tags() if t != tag])
 
     def _write_tags(self, tags) -> None:
         cleaned = _dedupe([t for t in tags if t])
-        text = "\n".join(cleaned) + ("\n" if cleaned else "")
-        self.tag_file.write_text(text, encoding="utf-8")
+        self.tag_file.write_text(
+            json.dumps(cleaned, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+
+    # ---- 疑问记录 ----
+    def list_questions(self) -> list[Question]:
+        if not self.question_file.exists():
+            return []
+        try:
+            data = json.loads(self.question_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(data, list):
+            return []
+        questions = [Question.from_dict(item) for item in data if isinstance(item, dict)]
+        questions.sort(key=lambda q: (q.game_id, q.qid))
+        return questions
+
+    def add_question(
+        self,
+        game_id: int,
+        small_round: str,
+        note: str,
+        paifu_link: str = "",
+        ai_link: str = "",
+        ai_link2: str = "",
+    ) -> Question:
+        questions = self.list_questions()
+        next_id = max((q.qid for q in questions), default=0) + 1
+        question = Question(
+            next_id, game_id, small_round, note, paifu_link, ai_link, ai_link2
+        )
+        questions.append(question)
+        self._write_questions(questions)
+        return question
+
+    def update_question(
+        self,
+        qid: int,
+        game_id: int,
+        small_round: str,
+        note: str,
+        paifu_link: str = "",
+        ai_link: str = "",
+        ai_link2: str = "",
+    ) -> None:
+        questions = self.list_questions()
+        for question in questions:
+            if question.qid == qid:
+                question.game_id = game_id
+                question.small_round = small_round
+                question.note = note
+                question.paifu_link = paifu_link
+                question.ai_link = ai_link
+                question.ai_link2 = ai_link2
+                break
+        self._write_questions(questions)
+
+    def delete_question(self, qid: int) -> None:
+        self._write_questions([q for q in self.list_questions() if q.qid != qid])
+
+    def _write_questions(self, questions) -> None:
+        data = [q.to_dict() for q in sorted(questions, key=lambda q: (q.game_id, q.qid))]
+        self.question_file.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )

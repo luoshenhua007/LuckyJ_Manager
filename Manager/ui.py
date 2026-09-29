@@ -6,7 +6,7 @@ import os
 import random
 import tkinter as tk
 import webbrowser
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from storage import MASTERED, Scene, Storage, parse_tags
 
@@ -17,6 +17,21 @@ IMAGE_TYPES = [
     ("图片", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
     ("所有文件", "*.*"),
 ]
+MODE_KEYS = {
+    "严格匹配": "strict",
+    "尽量匹配主tag": "primary",
+    "尽量匹配tag": "any",
+}
+
+
+def parse_positive_int(text):
+    """把输入解析为正整数，非法（非纯 ASCII 数字或 <=0）返回 None。"""
+    text = (text or "").strip()
+    if text.isascii() and text.isdigit():
+        value = int(text)
+        if value > 0:
+            return value
+    return None
 
 
 def load_photo(path, max_size):
@@ -91,9 +106,83 @@ class HomeFrame(BaseFrame):
             ("新建", self.app.show_new),
             ("查找", self.app.show_search),
             ("复习", self.app.show_review),
+            ("疑问", self.app.show_questions),
             ("标签管理", self.app.show_tag_manager),
         ):
             ttk.Button(self, text=text, width=22, command=command).pack(pady=8)
+
+
+class QuestionDialog(tk.Toplevel):
+    """在新增何切时快速记录一条疑问（不丢失当前表单内容）。"""
+
+    def __init__(
+        self,
+        master,
+        storage: Storage,
+        game_id=None,
+        on_saved=None,
+        paifu_link: str = "",
+        ai_link: str = "",
+        ai_link2: str = "",
+    ):
+        super().__init__(master)
+        self.storage = storage
+        self.on_saved = on_saved
+        self.title("记录疑问")
+        self.geometry("520x480")
+        self.transient(master)
+        self.grab_set()
+
+        self.game_var = tk.StringVar(value=str(game_id) if game_id is not None else "")
+        self.round_var = tk.StringVar()
+        self.paifu_var = tk.StringVar(value=paifu_link or "")
+        self.ai_link_var = tk.StringVar(value=ai_link or "")
+        self.ai_link2_var = tk.StringVar(value=ai_link2 or "")
+
+        form = ttk.Frame(self, padding=16)
+        form.pack(fill="both", expand=True)
+        form.columnconfigure(1, weight=1)
+        form.rowconfigure(5, weight=1)
+
+        ttk.Label(form, text="序号 *").grid(row=0, column=0, sticky="w", pady=6)
+        ttk.Entry(form, textvariable=self.game_var).grid(row=0, column=1, sticky="ew", padx=8)
+        ttk.Label(form, text="小局 *").grid(row=1, column=0, sticky="w", pady=6)
+        ttk.Entry(form, textvariable=self.round_var).grid(row=1, column=1, sticky="ew", padx=8)
+        ttk.Label(form, text="原牌谱链接").grid(row=2, column=0, sticky="w", pady=6)
+        ttk.Entry(form, textvariable=self.paifu_var).grid(row=2, column=1, sticky="ew", padx=8)
+        ttk.Label(form, text="AI 复盘链接").grid(row=3, column=0, sticky="w", pady=6)
+        ttk.Entry(form, textvariable=self.ai_link_var).grid(row=3, column=1, sticky="ew", padx=8)
+        ttk.Label(form, text="参考 AI 复盘链接").grid(row=4, column=0, sticky="w", pady=6)
+        ttk.Entry(form, textvariable=self.ai_link2_var).grid(row=4, column=1, sticky="ew", padx=8)
+        ttk.Label(form, text="疑问点").grid(row=5, column=0, sticky="nw", pady=6)
+        self.note_text = tk.Text(form, height=7, wrap="word")
+        self.note_text.grid(row=5, column=1, sticky="nsew", padx=8, pady=6)
+
+        actions = ttk.Frame(self, padding=(16, 0))
+        actions.pack(fill="x", pady=12)
+        ttk.Button(actions, text="保存", command=self.save).pack(side="left")
+        ttk.Button(actions, text="取消", command=self.destroy).pack(side="left", padx=8)
+
+    def save(self):
+        game_id = parse_positive_int(self.game_var.get())
+        if game_id is None:
+            messagebox.showwarning("提示", "序号必须是正整数。", parent=self)
+            return
+        small_round = self.round_var.get().strip()
+        if not small_round:
+            messagebox.showwarning("提示", "小局为必填项。", parent=self)
+            return
+        self.storage.add_question(
+            game_id,
+            small_round,
+            self.note_text.get("1.0", "end").strip(),
+            self.paifu_var.get().strip(),
+            self.ai_link_var.get().strip(),
+            self.ai_link2_var.get().strip(),
+        )
+        if self.on_saved:
+            self.on_saved()
+        self.destroy()
 
 
 class NewFrame(BaseFrame):
@@ -109,6 +198,7 @@ class NewFrame(BaseFrame):
         self.ai_img_var = tk.StringVar()
         self.ai_img2_var = tk.StringVar()
         self.tags_var = tk.StringVar()
+        self.tags2_var = tk.StringVar()
         self.status_var = tk.StringVar(value="带 * 的为必填项。")
         self.game_hint_var = tk.StringVar(value="")
 
@@ -120,6 +210,9 @@ class NewFrame(BaseFrame):
         ttk.Label(game_box, textvariable=self.game_hint_var, foreground="#2a7").grid(
             row=2, column=1, columnspan=2, sticky="w", padx=8
         )
+        ttk.Button(game_box, text="恢复上次序号", command=self.restore_last_game).grid(
+            row=3, column=2, sticky="w", padx=8
+        )
         self.game_var.trace_add("write", lambda *_: self._update_game_hint())
 
         cut_box = ttk.LabelFrame(self, text="何切信息", padding=10)
@@ -130,10 +223,11 @@ class NewFrame(BaseFrame):
         self._add_file(cut_box, 2, "何切模式截图", self.whatcut_var)
         self._add_file(cut_box, 3, "AI 权重截图 *", self.ai_img_var)
         self._add_file(cut_box, 4, "参考 AI 权重截图", self.ai_img2_var)
-        self._add_entry(cut_box, 5, "标签 *", self.tags_var, hint="多个标签用空格或逗号分隔")
-        self.comment_text = self._add_text(cut_box, 6, "文字解读", height=4)
+        self._add_entry(cut_box, 5, "主要标签 *", self.tags_var, hint="影响何切选择的主要因素")
+        self._add_entry(cut_box, 6, "次要标签", self.tags2_var, hint="次要/辅助标签（选填）")
+        self.comment_text = self._add_text(cut_box, 7, "文字解读", height=4)
 
-        tag_box = ttk.LabelFrame(self, text="已有标签（双击添加）", padding=8)
+        tag_box = ttk.LabelFrame(self, text="已有标签（按使用次数排序，双击加到主要标签）", padding=8)
         tag_box.pack(fill="x", pady=(12, 0))
         self.tag_list = tk.Listbox(tag_box, height=4, exportselection=False)
         self.tag_list.pack(side="left", fill="x", expand=True)
@@ -141,6 +235,12 @@ class NewFrame(BaseFrame):
         scroll.pack(side="right", fill="y")
         self.tag_list.configure(yscrollcommand=scroll.set)
         self.tag_list.bind("<Double-Button-1>", self._add_tag_from_list)
+        tag_btns = ttk.Frame(tag_box)
+        tag_btns.pack(side="right", fill="y", padx=(8, 0))
+        ttk.Button(tag_btns, text="加到主要 →", command=self._add_selected_to_primary).pack(fill="x")
+        ttk.Button(tag_btns, text="加到次要 →", command=self._add_selected_to_secondary).pack(
+            fill="x", pady=(6, 0)
+        )
         self._refresh_tags()
 
         actions = ttk.Frame(self)
@@ -148,6 +248,9 @@ class NewFrame(BaseFrame):
         ttk.Button(actions, text="保存并继续添加", command=self.save).pack(side="left")
         ttk.Button(actions, text="清空何切", command=self.clear_cut).pack(side="left", padx=8)
         ttk.Button(actions, text="清空全部", command=self.clear_all).pack(side="left")
+        ttk.Button(actions, text="记录疑问…", command=self.open_question_dialog).pack(
+            side="right"
+        )
         ttk.Label(self, textvariable=self.status_var, foreground="#555").pack(anchor="w")
 
     def _add_entry(self, parent, row, label, var, hint=""):
@@ -181,37 +284,79 @@ class NewFrame(BaseFrame):
 
     def _refresh_tags(self):
         self.tag_list.delete(0, "end")
-        for tag in self.storage.get_all_tags():
-            self.tag_list.insert("end", tag)
+        counts = self.storage.tag_counts()
+        tags = sorted(self.storage.get_all_tags(), key=lambda t: (-counts.get(t, 0), t))
+        self._tag_names = tags
+        for tag in tags:
+            self.tag_list.insert("end", f"{tag} ({counts.get(tag, 0)})")
 
     def _add_tag_from_list(self, _event):
+        self._add_selected_tag(self.tags_var)
+
+    def _add_selected_to_primary(self):
+        self._add_selected_tag(self.tags_var)
+
+    def _add_selected_to_secondary(self):
+        self._add_selected_tag(self.tags2_var)
+
+    def _add_selected_tag(self, var):
         selection = self.tag_list.curselection()
         if not selection:
             return
-        tag = self.tag_list.get(selection[0])
-        current = parse_tags(self.tags_var.get())
+        names = getattr(self, "_tag_names", [])
+        if selection[0] >= len(names):
+            return
+        tag = names[selection[0]]
+        current = parse_tags(var.get())
         if tag not in current:
             current.append(tag)
-            self.tags_var.set(" ".join(current))
+            var.set(" ".join(current))
+
+    def open_question_dialog(self):
+        prefill = parse_positive_int(self.game_var.get())
+        QuestionDialog(
+            self,
+            self.storage,
+            game_id=prefill,
+            paifu_link=self.paifu_var.get().strip(),
+            ai_link=self.ai_link_var.get().strip(),
+            ai_link2=self.ai_link2_var.get().strip(),
+        )
+
+    def restore_last_game(self):
+        last = self.storage.get_last_game()
+        game_id = last.get("序号")
+        if game_id is None:
+            messagebox.showinfo("提示", "没有可恢复的上次序号。")
+            return
+        self.game_var.set(str(game_id))
+        if not self.paifu_var.get().strip() and last.get("原牌谱链接"):
+            self.paifu_var.set(last["原牌谱链接"])
+        if not self.ai_link_var.get().strip() and last.get("AI复盘链接"):
+            self.ai_link_var.set(last["AI复盘链接"])
+        if not self.ai_link2_var.get().strip() and last.get("参考AI复盘链接"):
+            self.ai_link2_var.set(last["参考AI复盘链接"])
+        self.status_var.set(f"已恢复上次序号 #{game_id}（含牌谱/复盘链接）。")
 
     def _update_game_hint(self):
-        text = self.game_var.get().strip()
-        if not text.isdigit() or int(text) <= 0:
+        game_id = parse_positive_int(self.game_var.get())
+        if game_id is None:
             self.game_hint_var.set("")
             return
-        game_id = int(text)
         count = sum(1 for s in self.storage.list_scenes() if s.game_id == game_id)
         next_id = self.storage.next_cut_id(game_id)
         self.game_hint_var.set(f"该牌谱已有 {count} 道何切，下一道为 #{game_id}-{next_id}。")
 
-    def clear_cut(self):
+    def clear_cut(self, keep_links: bool = False):
+        if not keep_links:
+            self.ai_link_var.set("")
+            self.ai_link2_var.set("")
         for var in (
-            self.ai_link_var,
-            self.ai_link2_var,
             self.whatcut_var,
             self.ai_img_var,
             self.ai_img2_var,
             self.tags_var,
+            self.tags2_var,
         ):
             var.set("")
         self.comment_text.delete("1.0", "end")
@@ -224,8 +369,8 @@ class NewFrame(BaseFrame):
         self.status_var.set("带 * 的为必填项。")
 
     def save(self):
-        game_text = self.game_var.get().strip()
-        if not game_text.isdigit() or int(game_text) <= 0:
+        game_id = parse_positive_int(self.game_var.get())
+        if game_id is None:
             messagebox.showwarning("提示", "序号必须是正整数。")
             return
         ai_link = self.ai_link_var.get().strip()
@@ -238,8 +383,9 @@ class NewFrame(BaseFrame):
             return
         tags = parse_tags(self.tags_var.get())
         if not tags:
-            messagebox.showwarning("提示", "至少填写一个标签。")
+            messagebox.showwarning("提示", "至少填写一个主要标签。")
             return
+        tags2 = parse_tags(self.tags2_var.get())
         whatcut = self.whatcut_var.get().strip()
         if whatcut and not os.path.exists(whatcut):
             messagebox.showwarning("提示", "何切模式截图路径不存在。")
@@ -247,7 +393,7 @@ class NewFrame(BaseFrame):
 
         try:
             scene = self.storage.create_scene(
-                game_id=int(game_text),
+                game_id=game_id,
                 ai_link=ai_link,
                 tags=tags,
                 ai_img_src=ai_img,
@@ -256,15 +402,16 @@ class NewFrame(BaseFrame):
                 comment=self.comment_text.get("1.0", "end").strip(),
                 ai_link2=self.ai_link2_var.get().strip(),
                 ai_img2_src=self.ai_img2_var.get().strip() or None,
+                tags2=tags2,
             )
         except OSError as exc:
             messagebox.showerror("保存失败", str(exc))
             return
 
-        self.clear_cut()
+        self.clear_cut(keep_links=True)
         self._refresh_tags()
         self._update_game_hint()
-        self.status_var.set(f"已保存 {scene.title}，可继续添加下一道何切。")
+        self.status_var.set(f"已保存 {scene.title}，可继续添加下一道何切（AI 链接已保留）。")
         messagebox.showinfo("成功", f"已保存 {scene.title}。")
 
 
@@ -292,6 +439,7 @@ class SceneEditor(tk.Toplevel):
         self.ai_link_var = tk.StringVar(value=scene.ai_link)
         self.ai_link2_var = tk.StringVar(value=scene.ai_link2)
         self.tags_var = tk.StringVar(value=" ".join(scene.tags))
+        self.tags2_var = tk.StringVar(value=" ".join(scene.tags2))
         self.ai_img_var = tk.StringVar(value=scene.ai_img or "（无）")
         self.ai_img2_var = tk.StringVar(value=scene.ai_img2 or "（无）")
         self.whatcut_var = tk.StringVar(
@@ -338,12 +486,15 @@ class SceneEditor(tk.Toplevel):
         ttk.Button(ai2_btns, text="选择新图", command=self._pick_ai2).pack(side="left")
         ttk.Button(ai2_btns, text="移除", command=self._remove_ai2_image).pack(side="left", padx=6)
 
-        ttk.Label(form, text="标签 *").grid(row=7, column=0, sticky="w", pady=6)
+        ttk.Label(form, text="主要标签 *").grid(row=7, column=0, sticky="w", pady=6)
         ttk.Entry(form, textvariable=self.tags_var).grid(row=7, column=1, columnspan=2, sticky="ew", padx=8)
 
-        ttk.Label(form, text="文字解读").grid(row=8, column=0, sticky="nw", pady=6)
+        ttk.Label(form, text="次要标签").grid(row=8, column=0, sticky="w", pady=6)
+        ttk.Entry(form, textvariable=self.tags2_var).grid(row=8, column=1, columnspan=2, sticky="ew", padx=8)
+
+        ttk.Label(form, text="文字解读").grid(row=9, column=0, sticky="nw", pady=6)
         self.comment_text = tk.Text(form, height=5, wrap="word")
-        self.comment_text.grid(row=8, column=1, columnspan=2, sticky="ew", padx=8, pady=6)
+        self.comment_text.grid(row=9, column=1, columnspan=2, sticky="ew", padx=8, pady=6)
         self.comment_text.insert("1.0", self.scene.comment)
 
         actions = ttk.Frame(self, padding=(16, 0))
@@ -382,9 +533,9 @@ class SceneEditor(tk.Toplevel):
         self.whatcut_var.set("（无）")
 
     def _save(self):
-        game_text = self.game_var.get().strip()
-        if not game_text.isdigit():
-            messagebox.showwarning("提示", "序号必须是非负整数。", parent=self)
+        game_id = parse_positive_int(self.game_var.get())
+        if game_id is None:
+            messagebox.showwarning("提示", "序号必须是正整数。", parent=self)
             return
         ai_link = self.ai_link_var.get().strip()
         if not ai_link:
@@ -392,15 +543,16 @@ class SceneEditor(tk.Toplevel):
             return
         tags = parse_tags(self.tags_var.get())
         if not tags:
-            messagebox.showwarning("提示", "至少填写一个标签。", parent=self)
+            messagebox.showwarning("提示", "至少填写一个主要标签。", parent=self)
             return
         try:
             self.storage.update_scene(
                 self.scene,
-                game_id=int(game_text),
+                game_id=game_id,
                 ai_link=ai_link,
                 ai_link2=self.ai_link2_var.get().strip(),
                 tags=tags,
+                tags2=parse_tags(self.tags2_var.get()),
                 paifu_link=self.paifu_var.get().strip(),
                 comment=self.comment_text.get("1.0", "end").strip(),
                 ai_img_src=self._ai_src,
@@ -431,19 +583,36 @@ class SearchFrame(BaseFrame):
         entry.bind("<Return>", lambda _e: self.search())
         ttk.Button(top, text="查找", command=self.search).pack(side="left")
         ttk.Button(top, text="显示全部", command=self.show_all).pack(side="left", padx=6)
+        ttk.Label(top, text="匹配：").pack(side="left", padx=(12, 0))
+        self.mode_var = tk.StringVar(value="严格匹配")
+        mode_box = ttk.Combobox(
+            top,
+            textvariable=self.mode_var,
+            width=15,
+            state="readonly",
+            values=list(MODE_KEYS.keys()),
+        )
+        mode_box.pack(side="left", padx=6)
+        mode_box.bind("<<ComboboxSelected>>", lambda _e: self.search())
 
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True, pady=12)
 
         left = ttk.Frame(body)
         left.pack(side="left", fill="both", expand=True)
-        self.tree = ttk.Treeview(left, columns=("tags", "progress"), show="tree headings")
+        self.tree = ttk.Treeview(
+            left, columns=("tags", "tags2", "match", "progress"), show="tree headings"
+        )
         self.tree.heading("#0", text="题目")
-        self.tree.heading("tags", text="标签")
+        self.tree.heading("tags", text="主要标签")
+        self.tree.heading("tags2", text="次要标签")
+        self.tree.heading("match", text="匹配")
         self.tree.heading("progress", text="进度")
-        self.tree.column("#0", width=90, anchor="w")
-        self.tree.column("tags", width=260, anchor="w")
-        self.tree.column("progress", width=60, anchor="center")
+        self.tree.column("#0", width=80, anchor="w")
+        self.tree.column("tags", width=190, anchor="w")
+        self.tree.column("tags2", width=170, anchor="w")
+        self.tree.column("match", width=50, anchor="center")
+        self.tree.column("progress", width=50, anchor="center")
         self.tree.pack(side="left", fill="both", expand=True)
         tree_scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
         tree_scroll.pack(side="right", fill="y")
@@ -460,12 +629,13 @@ class SearchFrame(BaseFrame):
         )
         buttons = ttk.Frame(right)
         buttons.pack(fill="x")
-        ttk.Button(buttons, text="切换截图", command=self.toggle_image).pack(side="left")
-        ttk.Button(buttons, text="参考AI图", command=self.show_ai2).pack(side="left", padx=6)
-        ttk.Button(buttons, text="打开原图", command=self.open_image).pack(side="left")
-        ttk.Button(buttons, text="打开AI链接", command=self.open_ai_link).pack(side="left", padx=6)
-        ttk.Button(buttons, text="打开参考链接", command=self.open_ai_link2).pack(side="left")
-        ttk.Button(buttons, text="打开原牌谱", command=self.open_paifu).pack(side="left", padx=6)
+        ttk.Button(buttons, text="何切图", command=lambda: self.show_view("whatcut")).pack(side="left")
+        ttk.Button(buttons, text="主AI图", command=lambda: self.show_view("ai")).pack(side="left", padx=6)
+        ttk.Button(buttons, text="参考AI图", command=lambda: self.show_view("ai2")).pack(side="left")
+        ttk.Button(buttons, text="打开原图", command=self.open_image).pack(side="left", padx=6)
+        ttk.Button(buttons, text="打开AI链接", command=self.open_ai_link).pack(side="left")
+        ttk.Button(buttons, text="打开参考链接", command=self.open_ai_link2).pack(side="left", padx=6)
+        ttk.Button(buttons, text="打开原牌谱", command=self.open_paifu).pack(side="left")
 
         edit_buttons = ttk.Frame(right)
         edit_buttons.pack(fill="x", pady=(6, 0))
@@ -479,14 +649,29 @@ class SearchFrame(BaseFrame):
     def _populate(self, scenes: list[Scene]):
         self.tree.delete(*self.tree.get_children())
         self._scenes.clear()
+        query = self.query_var.get().strip()
+        has_query = bool(query)
+        total = len(parse_tags(query)) if has_query else 0
+        mode = MODE_KEYS.get(self.mode_var.get(), "strict")
         for scene in scenes:
             iid = scene.title
+            if not has_query:
+                match = "-"
+            elif mode == "strict":
+                match = f"{total}/{total}"
+            else:
+                match = f"{scene.match_score}/{total}"
             self.tree.insert(
                 "",
                 "end",
                 iid=iid,
                 text=scene.title,
-                values=(", ".join(scene.tags), f"{scene.progress}/{MASTERED}"),
+                values=(
+                    ", ".join(scene.tags),
+                    ", ".join(scene.tags2),
+                    match,
+                    f"{scene.progress}/{MASTERED}",
+                ),
             )
             self._scenes[iid] = scene
         self.image_label.configure(image="", text="选择左侧题目查看")
@@ -499,7 +684,8 @@ class SearchFrame(BaseFrame):
         self._populate(self.storage.list_scenes())
 
     def search(self):
-        self._populate(self.storage.find_scenes(self.query_var.get()))
+        mode = MODE_KEYS.get(self.mode_var.get(), "strict")
+        self._populate(self.storage.find_scenes(self.query_var.get(), mode))
 
     def _on_select(self, _event):
         selection = self.tree.selection()
@@ -509,11 +695,11 @@ class SearchFrame(BaseFrame):
         self._view = "whatcut"
         self._render()
 
-    def toggle_image(self):
+    def show_view(self, view):
         if self._current is None:
+            messagebox.showinfo("提示", "请先在左侧选择一道题目。")
             return
-        order = ["whatcut", "ai", "ai2"]
-        self._view = order[(order.index(self._view) + 1) % len(order)]
+        self._view = view
         self._render()
 
     def _render(self):
@@ -541,7 +727,8 @@ class SearchFrame(BaseFrame):
             self.image_label.configure(image="", text="（无可用截图）")
             self.image_label.image = None
         info = (
-            f"{scene.title}\n标签：{', '.join(scene.tags)}\n"
+            f"{scene.title}\n主要标签：{', '.join(scene.tags)}\n"
+            f"次要标签：{', '.join(scene.tags2) or '（无）'}\n"
             f"进度：{scene.progress}/{MASTERED}\n当前显示：{kind}"
         )
         if scene.comment:
@@ -561,13 +748,6 @@ class SearchFrame(BaseFrame):
     def open_paifu(self):
         if self._current:
             open_url(self._current.paifu_link)
-
-    def show_ai2(self):
-        if self._current is None:
-            messagebox.showinfo("提示", "请先在左侧选择一道题目。")
-            return
-        self._view = "ai2"
-        self._render()
 
     def open_image(self):
         if self._current is None:
@@ -769,13 +949,14 @@ class TagManagerFrame(BaseFrame):
     def __init__(self, master, app):
         super().__init__(master, app)
         self.header("标签管理")
+        self._tag_names: list[str] = []
 
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True)
 
-        left = ttk.LabelFrame(body, text="标签列表", padding=8)
+        left = ttk.LabelFrame(body, text="标签列表（按使用次数排序，可多选）", padding=8)
         left.pack(side="left", fill="both", expand=True)
-        self.listbox = tk.Listbox(left, exportselection=False)
+        self.listbox = tk.Listbox(left, exportselection=False, selectmode="extended")
         self.listbox.pack(side="left", fill="both", expand=True)
         scroll = ttk.Scrollbar(left, orient="vertical", command=self.listbox.yview)
         scroll.pack(side="right", fill="y")
@@ -790,24 +971,34 @@ class TagManagerFrame(BaseFrame):
         ttk.Button(right, text="添加", command=self.add_tag).pack(fill="x", pady=2)
         ttk.Button(right, text="重命名为输入框内容", command=self.rename_tag).pack(fill="x", pady=2)
         ttk.Button(right, text="删除选中标签", command=self.delete_tag).pack(fill="x", pady=2)
+        ttk.Button(right, text="合并选中标签…", command=self.merge_tags).pack(fill="x", pady=2)
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=8)
         self.count_var = tk.StringVar()
-        ttk.Label(right, textvariable=self.count_var, justify="left", wraplength=220).pack(anchor="w")
+        ttk.Label(right, textvariable=self.count_var, justify="left", wraplength=240).pack(anchor="w")
 
         self.refresh()
 
     def refresh(self):
         self.listbox.delete(0, "end")
-        tags = self.storage.get_all_tags()
+        counts = self.storage.tag_counts()
+        tags = sorted(self.storage.get_all_tags(), key=lambda t: (-counts.get(t, 0), t))
+        self._tag_names = tags
         for tag in tags:
-            self.listbox.insert("end", tag)
+            self.listbox.insert("end", f"{tag} ({counts.get(tag, 0)})")
         scenes = self.storage.list_scenes()
         self.count_var.set(f"共 {len(tags)} 个标签，{len(scenes)} 道何切题。")
 
+    def _selected_names(self) -> list[str]:
+        names = []
+        for index in self.listbox.curselection():
+            if index < len(self._tag_names):
+                names.append(self._tag_names[index])
+        return names
+
     def _on_select(self, _event):
-        selection = self.listbox.curselection()
-        if selection:
-            self.entry_var.set(self.listbox.get(selection[0]))
+        names = self._selected_names()
+        if names:
+            self.entry_var.set(names[-1])
 
     def add_tag(self):
         tags = parse_tags(self.entry_var.get())
@@ -819,12 +1010,12 @@ class TagManagerFrame(BaseFrame):
         self.refresh()
 
     def rename_tag(self):
-        selection = self.listbox.curselection()
+        names = self._selected_names()
         new = self.entry_var.get().strip()
-        if not selection:
+        if not names:
             messagebox.showinfo("提示", "请先在左侧选择要重命名的标签。")
             return
-        old = self.listbox.get(selection[0])
+        old = names[0]
         if not new or new == old:
             messagebox.showinfo("提示", "请在输入框填写新的标签名。")
             return
@@ -833,18 +1024,202 @@ class TagManagerFrame(BaseFrame):
         self.refresh()
 
     def delete_tag(self):
-        selection = self.listbox.curselection()
-        if not selection:
+        names = self._selected_names()
+        if not names:
             messagebox.showinfo("提示", "请先在左侧选择要删除的标签。")
             return
-        tag = self.listbox.get(selection[0])
         if not messagebox.askyesno(
-            "确认删除", f"确定删除标签「{tag}」？\n该标签会从所有题目中移除。"
+            "确认删除", f"确定删除标签「{'、'.join(names)}」？\n这些标签会从所有题目中移除。"
         ):
             return
-        self.storage.delete_tag(tag)
+        for tag in names:
+            self.storage.delete_tag(tag)
         self.entry_var.set("")
         self.refresh()
+
+    def merge_tags(self):
+        names = self._selected_names()
+        if len(names) < 2:
+            messagebox.showinfo("提示", "请至少选择两个标签进行合并。")
+            return
+        target = simpledialog.askstring(
+            "合并标签",
+            "把选中的标签合并为（输入目标标签名）：\n\n" + "、".join(names),
+            initialvalue=names[0],
+            parent=self,
+        )
+        if target is None:
+            return
+        target = target.strip()
+        if not target:
+            messagebox.showinfo("提示", "目标标签名不能为空。")
+            return
+        self.storage.merge_tags(names, target)
+        self.entry_var.set("")
+        self.refresh()
+        messagebox.showinfo("完成", f"已合并为「{target}」。")
+
+
+class QuestionFrame(BaseFrame):
+    def __init__(self, master, app):
+        super().__init__(master, app)
+        self.header("疑问小局")
+        self._questions: dict[str, object] = {}
+        self._current = None
+
+        body = ttk.Frame(self)
+        body.pack(fill="both", expand=True)
+
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="both", expand=True)
+        self.tree = ttk.Treeview(left, columns=("round", "note"), show="tree headings")
+        self.tree.heading("#0", text="序号")
+        self.tree.heading("round", text="小局")
+        self.tree.heading("note", text="疑问点")
+        self.tree.column("#0", width=70, anchor="w")
+        self.tree.column("round", width=130, anchor="w")
+        self.tree.column("note", width=420, anchor="w")
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
+        scroll.pack(side="right", fill="y")
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.bind("<<TreeviewSelect>>", self._on_select)
+
+        right = ttk.LabelFrame(body, text="记录疑问", padding=10)
+        right.pack(side="right", fill="y", padx=(12, 0))
+
+        ttk.Label(right, text="序号 *").pack(anchor="w")
+        self.game_var = tk.StringVar()
+        ttk.Entry(right, textvariable=self.game_var, width=30).pack(fill="x", pady=4)
+
+        ttk.Label(right, text="小局 *").pack(anchor="w")
+        self.round_var = tk.StringVar()
+        ttk.Entry(right, textvariable=self.round_var, width=30).pack(fill="x", pady=4)
+
+        ttk.Label(right, text="原牌谱链接").pack(anchor="w")
+        self.paifu_var = tk.StringVar()
+        ttk.Entry(right, textvariable=self.paifu_var, width=30).pack(fill="x", pady=4)
+
+        ttk.Label(right, text="AI 复盘链接").pack(anchor="w")
+        self.ai_link_var = tk.StringVar()
+        ttk.Entry(right, textvariable=self.ai_link_var, width=30).pack(fill="x", pady=4)
+
+        ttk.Label(right, text="参考 AI 复盘链接").pack(anchor="w")
+        self.ai_link2_var = tk.StringVar()
+        ttk.Entry(right, textvariable=self.ai_link2_var, width=30).pack(fill="x", pady=4)
+
+        ttk.Label(right, text="疑问点").pack(anchor="w")
+        self.note_text = tk.Text(right, width=36, height=7, wrap="word")
+        self.note_text.pack(fill="both", expand=True, pady=4)
+
+        buttons = ttk.Frame(right)
+        buttons.pack(fill="x", pady=(6, 0))
+        ttk.Button(buttons, text="新增", command=self.add).pack(side="left")
+        ttk.Button(buttons, text="保存修改", command=self.update).pack(side="left", padx=6)
+        ttk.Button(buttons, text="删除", command=self.delete).pack(side="left")
+        ttk.Button(right, text="清空", command=self.clear).pack(fill="x", pady=(6, 0))
+
+        self.status_var = tk.StringVar(value="带 * 的为必填项。")
+        ttk.Label(right, textvariable=self.status_var, foreground="#555", wraplength=240).pack(
+            anchor="w", pady=(6, 0)
+        )
+
+        self.refresh()
+
+    def refresh(self):
+        self.tree.delete(*self.tree.get_children())
+        self._questions.clear()
+        for question in self.storage.list_questions():
+            iid = str(question.qid)
+            self.tree.insert(
+                "",
+                "end",
+                iid=iid,
+                text=str(question.game_id),
+                values=(question.small_round, question.note.replace("\n", " ")),
+            )
+            self._questions[iid] = question
+        self._current = None
+
+    def _on_select(self, _event):
+        selection = self.tree.selection()
+        if not selection:
+            return
+        question = self._questions.get(selection[0])
+        if question is None:
+            return
+        self._current = question
+        self.game_var.set(str(question.game_id))
+        self.round_var.set(question.small_round)
+        self.paifu_var.set(question.paifu_link)
+        self.ai_link_var.set(question.ai_link)
+        self.ai_link2_var.set(question.ai_link2)
+        self.note_text.delete("1.0", "end")
+        self.note_text.insert("1.0", question.note)
+        self.status_var.set(f"正在编辑 #{question.game_id} {question.small_round}")
+
+    def _read_form(self):
+        game_id = parse_positive_int(self.game_var.get())
+        if game_id is None:
+            messagebox.showwarning("提示", "序号必须是正整数。")
+            return None
+        small_round = self.round_var.get().strip()
+        if not small_round:
+            messagebox.showwarning("提示", "小局为必填项。")
+            return None
+        return (
+            game_id,
+            small_round,
+            self.note_text.get("1.0", "end").strip(),
+            self.paifu_var.get().strip(),
+            self.ai_link_var.get().strip(),
+            self.ai_link2_var.get().strip(),
+        )
+
+    def add(self):
+        parsed = self._read_form()
+        if parsed is None:
+            return
+        self.storage.add_question(*parsed)
+        self.clear()
+        self.refresh()
+        self.status_var.set("已新增疑问。")
+
+    def update(self):
+        if self._current is None:
+            messagebox.showinfo("提示", "请先在左侧选择要修改的疑问。")
+            return
+        parsed = self._read_form()
+        if parsed is None:
+            return
+        self.storage.update_question(self._current.qid, *parsed)
+        self.clear()
+        self.refresh()
+        self.status_var.set("已保存修改。")
+
+    def delete(self):
+        if self._current is None:
+            messagebox.showinfo("提示", "请先在左侧选择要删除的疑问。")
+            return
+        title = f"#{self._current.game_id} {self._current.small_round}"
+        if not messagebox.askyesno("确认删除", f"确定删除「{title}」的疑问？"):
+            return
+        self.storage.delete_question(self._current.qid)
+        self.clear()
+        self.refresh()
+        self.status_var.set("已删除。")
+
+    def clear(self):
+        self._current = None
+        self.game_var.set("")
+        self.round_var.set("")
+        self.paifu_var.set("")
+        self.ai_link_var.set("")
+        self.ai_link2_var.set("")
+        self.note_text.delete("1.0", "end")
+        for iid in self.tree.selection():
+            self.tree.selection_remove(iid)
+        self.status_var.set("带 * 的为必填项。")
 
 
 class App(tk.Tk):
@@ -875,6 +1250,9 @@ class App(tk.Tk):
 
     def show_review(self):
         self._swap(ReviewFrame)
+
+    def show_questions(self):
+        self._swap(QuestionFrame)
 
     def show_tag_manager(self):
         self._swap(TagManagerFrame)
