@@ -9,6 +9,7 @@ import webbrowser
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from storage import MASTERED, Scene, Storage, parse_tags
+from exporter import export_game
 
 MAX_IMAGE = (900, 600)
 QUESTION_IMAGE = (560, 520)
@@ -108,6 +109,7 @@ class HomeFrame(BaseFrame):
             ("复习", self.app.show_review),
             ("疑问", self.app.show_questions),
             ("标签管理", self.app.show_tag_manager),
+            ("导出牌谱", self.app.show_export),
         ):
             ttk.Button(self, text=text, width=22, command=command).pack(pady=8)
 
@@ -1108,6 +1110,12 @@ class QuestionFrame(BaseFrame):
         self.ai_link2_var = tk.StringVar()
         ttk.Entry(right, textvariable=self.ai_link2_var, width=30).pack(fill="x", pady=4)
 
+        link_btns = ttk.Frame(right)
+        link_btns.pack(fill="x", pady=(0, 4))
+        ttk.Button(link_btns, text="打开原牌谱", command=lambda: self._open_link(self.paifu_var.get(), "原牌谱链接")).pack(side="left")
+        ttk.Button(link_btns, text="打开AI链接", command=lambda: self._open_link(self.ai_link_var.get(), "AI 复盘链接")).pack(side="left", padx=4)
+        ttk.Button(link_btns, text="打开参考链接", command=lambda: self._open_link(self.ai_link2_var.get(), "参考 AI 复盘链接")).pack(side="left")
+
         ttk.Label(right, text="疑问点").pack(anchor="w")
         self.note_text = tk.Text(right, width=36, height=7, wrap="word")
         self.note_text.pack(fill="both", expand=True, pady=4)
@@ -1176,6 +1184,13 @@ class QuestionFrame(BaseFrame):
             self.ai_link2_var.get().strip(),
         )
 
+    def _open_link(self, url, label):
+        url = (url or "").strip()
+        if not url:
+            messagebox.showinfo("提示", f"没有填写{label}。")
+            return
+        open_url(url)
+
     def add(self):
         parsed = self._read_form()
         if parsed is None:
@@ -1222,6 +1237,68 @@ class QuestionFrame(BaseFrame):
         self.status_var.set("带 * 的为必填项。")
 
 
+class ExportFrame(BaseFrame):
+    def __init__(self, master, app):
+        super().__init__(master, app)
+        self.header("导出牌谱")
+        self.status_var = tk.StringVar(value="输入序号，选择格式后点“生成…”。")
+
+        form = ttk.Frame(self)
+        form.pack(fill="x", pady=(10, 0))
+        ttk.Label(form, text="序号 *").pack(side="left")
+        self.game_var = tk.StringVar()
+        ttk.Entry(form, textvariable=self.game_var, width=12).pack(side="left", padx=6)
+        ttk.Label(form, text="格式：").pack(side="left", padx=(16, 0))
+        self.format_var = tk.StringVar(value="长图 (PNG)")
+        ttk.Combobox(
+            form,
+            textvariable=self.format_var,
+            width=14,
+            state="readonly",
+            values=["长图 (PNG)", "PDF"],
+        ).pack(side="left")
+        ttk.Button(form, text="生成…", command=self.generate).pack(side="left", padx=12)
+
+        ttk.Label(
+            self,
+            text="内容：该序号下所有何切记录（图片+文字解读），以及所有疑问小局与疑问点。",
+            foreground="#888",
+        ).pack(anchor="w", pady=(16, 0))
+        ttk.Label(self, textvariable=self.status_var, foreground="#555", wraplength=900).pack(
+            anchor="w", pady=12
+        )
+
+    def generate(self):
+        game_id = parse_positive_int(self.game_var.get())
+        if game_id is None:
+            messagebox.showwarning("提示", "序号必须是正整数。")
+            return
+        label = self.format_var.get()
+        fmt = {"长图 (PNG)": "png", "PDF": "pdf"}[label]
+        ext = {"png": ".png", "pdf": ".pdf"}[fmt]
+        scenes = [s for s in self.storage.list_scenes() if s.game_id == game_id]
+        questions = [q for q in self.storage.list_questions() if q.game_id == game_id]
+        if not scenes and not questions:
+            messagebox.showinfo("提示", f"牌谱 #{game_id} 没有何切记录或疑问记录。")
+            return
+        path = filedialog.asksaveasfilename(
+            title="保存导出文件",
+            initialdir=str(self.storage.base_dir),
+            initialfile=f"牌谱_{game_id}{ext}",
+            defaultextension=ext,
+            filetypes=[(label, f"*{ext}"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            export_game(self.storage, game_id, fmt, path)
+        except Exception as exc:  # noqa: BLE001 - 导出失败原因多样，统一提示
+            messagebox.showerror("导出失败", str(exc))
+            return
+        self.status_var.set(f"已导出：{path}")
+        messagebox.showinfo("完成", f"已导出到：\n{path}")
+
+
 class App(tk.Tk):
     def __init__(self, storage: Storage | None = None):
         super().__init__()
@@ -1256,3 +1333,6 @@ class App(tk.Tk):
 
     def show_tag_manager(self):
         self._swap(TagManagerFrame)
+
+    def show_export(self):
+        self._swap(ExportFrame)
