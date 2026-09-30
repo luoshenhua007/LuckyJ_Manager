@@ -221,6 +221,7 @@ class Storage:
         self.tag_file = self.files_dir / "tags.json"
         self.question_file = self.files_dir / "questions.json"
         self.state_file = self.files_dir / "last.json"
+        self.settings_file = self.files_dir / "settings.json"
         self.files_dir.mkdir(parents=True, exist_ok=True)
         if not self.tag_file.exists():
             self.tag_file.write_text("[]\n", encoding="utf-8")
@@ -664,5 +665,34 @@ class Storage:
     def _write_questions(self, questions) -> None:
         data = [q.to_dict() for q in sorted(questions, key=lambda q: (q.game_id, q.qid))]
         self.question_file.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+
+    # ---- 设置 ----
+    def get_settings(self) -> dict:
+        defaults = {
+            "default_export_format": "png",
+            "default_export_dir": "",
+            "default_match_mode": "strict",
+        }
+        if not self.settings_file.exists():
+            return defaults
+        try:
+            loaded = json.loads(self.settings_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return defaults
+        if not isinstance(loaded, dict):
+            return defaults
+        result = dict(defaults)
+        for key in defaults:
+            if key in loaded:
+                result[key] = loaded[key]
+        return result
+
+    def set_settings(self, settings: dict) -> None:
+        data = self.get_settings()
+        for key, value in settings.items():
+            data[key] = value
+        self.settings_file.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )

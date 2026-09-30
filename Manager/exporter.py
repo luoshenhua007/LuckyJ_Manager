@@ -1,6 +1,9 @@
-"""牌谱导出：把某一序号的所有何切记录与疑问小局导出为长图 / PDF。
+"""牌谱导出：把某一序号的所有何切记录与疑问小局导出为长图 / PDF / ZIP。
 
-内容顺序：
+- 长图 / PDF：供人阅读的汇总。
+- ZIP：把该牌谱的照片 + manifest.json 打包，用于在不同用户之间分享/导入。
+
+内容顺序（长图/PDF）：
     顶部：该牌谱共用的链接（原牌谱 / AI 复盘 / 参考 AI 复盘）
     一、何切记录（按何切序号）：每条含标签、截图与文字解读
     二、疑问小局：每条含小局与疑问点
@@ -8,7 +11,11 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
+import tempfile
+import zipfile
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -204,11 +211,149 @@ def render_game_image(storage, game_id: int) -> Image.Image:
 
 
 def export_game(storage, game_id: int, fmt: str, out_path) -> None:
-    """fmt: "png"（长图）/ "pdf"。"""
+    """fmt: "png"（长图）/ "pdf" / "zip"（打包）。"""
     out_path = Path(out_path)
     fmt = fmt.lower()
+    if fmt == "zip":
+        export_zip(storage, game_id, out_path)
+        return
     image = render_game_image(storage, game_id)
     if fmt == "pdf":
         image.save(out_path, "PDF", resolution=150.0)
     else:
         image.save(out_path, "PNG")
+
+
+def _scene_images(scene) -> list[str]:
+    return [name for name in (scene.whatcut_img, scene.ai_img, scene.ai_img2) if name]
+
+
+def export_zip(storage, game_id: int, out_path) -> tuple[int, int]:
+    """把某序号的所有何切（照片 + 信息）与疑问打包为 zip。返回 (何切数, 疑问数)。"""
+    scenes = [s for s in storage.list_scenes() if s.game_id == game_id]
+    questions = [q for q in storage.list_questions() if q.game_id == game_id]
+    manifest = {
+        "format": "luckyj_export",
+        "version": 1,
+        "game_id": game_id,
+        "scenes": [],
+        "questions": [],
+    }
+    for scene in scenes:
+        manifest["scenes"].append(
+            {
+                "cut_id": scene.cut_id,
+                "paifu_link": scene.paifu_link,
+                "ai_link": scene.ai_link,
+                "ai_link2": scene.ai_link2,
+                "tags": list(scene.tags),
+                "tags2": list(scene.tags2),
+                "comment": scene.comment,
+                "progress": scene.progress,
+                "whatcut_img": scene.whatcut_img,
+                "ai_img": scene.ai_img,
+                "ai_img2": scene.ai_img2,
+            }
+        )
+    for question in questions:
+        manifest["questions"].append(
+            {
+                "small_round": question.small_round,
+                "note": question.note,
+                "paifu_link": question.paifu_link,
+                "ai_link": question.ai_link,
+                "ai_link2": question.ai_link2,
+            }
+        )
+    out_path = Path(out_path)
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        for scene in scenes:
+            for name in _scene_images(scene):
+                image_path = scene.folder / name
+                if image_path.exists():
+                    archive.write(image_path, name)
+    return len(scenes), len(questions)
+
+
+def peek_zip_manifest(zip_path) -> dict | None:
+    """读取 zip 中 manifest.json，失败返回 None。"""
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            return json.loads(archive.read("manifest.json").decode("utf-8"))
+    except (OSError, zipfile.BadZipFile, KeyError, json.JSONDecodeError):
+        return None
+
+
+def peek_zip_game_id(zip_path) -> int | None:
+    manifest = peek_zip_manifest(zip_path)
+    return manifest.get("game_id") if isinstance(manifest, dict) else None
+
+
+def _extract_member(archive, tmp: Path, name) -> str | None:
+    if not name:
+        return None
+    try:
+        data = archive.read(name)
+    except KeyError:
+        return None
+    target = tmp / Path(name).name
+    target.write_bytes(data)
+    return str(target)
+
+
+def import_zip(
+    storage,
+    zip_path,
+    target_game_id: int,
+    scene_cut_ids=None,
+    question_indices=None,
+) -> tuple[int, int]:
+    """从 zip 导入牌谱到目标序号。
+
+    scene_cut_ids：要导入的何切 cut_id 列表（None=全部）。
+    question_indices：要导入的疑问在 manifest 中的下标列表（None=全部）。
+    返回 (导入何切数, 导入疑问数)。
+    """
+    with zipfile.ZipFile(zip_path) as archive:
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+        tmp = Path(tempfile.mkdtemp(prefix="lj_import_"))
+        try:
+            scene_count = 0
+            scenes = sorted(
+                manifest.get("scenes", []),
+                key=lambda item: int(item.get("cut_id", 0) or 0),
+            )
+            for scene in scenes:
+                cut_id = int(scene.get("cut_id", 0) or 0)
+                if scene_cut_ids is not None and cut_id not in scene_cut_ids:
+                    continue
+                storage.create_scene(
+                    game_id=target_game_id,
+                    ai_link=str(scene.get("ai_link", "") or ""),
+                    tags=list(scene.get("tags", []) or []),
+                    ai_img_src=_extract_member(archive, tmp, scene.get("ai_img")),
+                    whatcut_img_src=_extract_member(archive, tmp, scene.get("whatcut_img")),
+                    paifu_link=str(scene.get("paifu_link", "") or ""),
+                    comment=str(scene.get("comment", "") or ""),
+                    ai_link2=str(scene.get("ai_link2", "") or ""),
+                    ai_img2_src=_extract_member(archive, tmp, scene.get("ai_img2")),
+                    tags2=list(scene.get("tags2", []) or []),
+                )
+                scene_count += 1
+            question_count = 0
+            for index, question in enumerate(manifest.get("questions", [])):
+                if question_indices is not None and index not in question_indices:
+                    continue
+                storage.add_question(
+                    target_game_id,
+                    str(question.get("small_round", "") or ""),
+                    str(question.get("note", "") or ""),
+                    str(question.get("paifu_link", "") or ""),
+                    str(question.get("ai_link", "") or ""),
+                    str(question.get("ai_link2", "") or ""),
+                )
+                question_count += 1
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    return scene_count, question_count

@@ -9,7 +9,7 @@ import webbrowser
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from storage import MASTERED, Scene, Storage, parse_tags
-from exporter import export_game
+from exporter import export_game, import_zip, peek_zip_manifest
 
 MAX_IMAGE = (900, 600)
 QUESTION_IMAGE = (560, 520)
@@ -23,6 +23,9 @@ MODE_KEYS = {
     "尽量匹配主tag": "primary",
     "尽量匹配tag": "any",
 }
+MODE_LABELS = {value: key for key, value in MODE_KEYS.items()}
+EXPORT_FORMAT_LABELS = {"png": "长图 (PNG)", "pdf": "PDF", "zip": "打包 (ZIP)"}
+EXPORT_FORMAT_KEYS = {value: key for key, value in EXPORT_FORMAT_LABELS.items()}
 
 
 def parse_positive_int(text):
@@ -102,16 +105,25 @@ class BaseFrame(ttk.Frame):
 class HomeFrame(BaseFrame):
     def __init__(self, master, app):
         super().__init__(master, app)
-        ttk.Label(self, text="LuckyJ Manager", font=("", 30, "bold")).pack(pady=(80, 50))
+        container = ttk.Frame(self)
+        container.pack(expand=True)
+        ttk.Label(container, text="LuckyJ Manager", font=("", 30, "bold")).pack(pady=(40, 6))
+        ttk.Label(container, text="牌谱何切管理", font=("", 12), foreground="#888").pack(
+            pady=(0, 32)
+        )
         for text, command in (
             ("新建", self.app.show_new),
             ("查找", self.app.show_search),
             ("复习", self.app.show_review),
             ("疑问", self.app.show_questions),
             ("标签管理", self.app.show_tag_manager),
-            ("导出牌谱", self.app.show_export),
+            ("导出/导入", self.app.show_export),
+            ("设置", self.app.show_settings),
         ):
-            ttk.Button(self, text=text, width=22, command=command).pack(pady=8)
+            ttk.Button(container, text=text, width=26, command=command).pack(pady=5, ipady=3)
+        ttk.Button(container, text="退出程序", width=26, command=self.app.destroy).pack(
+            pady=(28, 0), ipady=3
+        )
 
 
 class QuestionDialog(tk.Toplevel):
@@ -130,40 +142,40 @@ class QuestionDialog(tk.Toplevel):
         super().__init__(master)
         self.storage = storage
         self.on_saved = on_saved
+        self._paifu_link = paifu_link or ""
+        self._ai_link = ai_link or ""
+        self._ai_link2 = ai_link2 or ""
         self.title("记录疑问")
-        self.geometry("520x480")
+        self.geometry("440x300")
         self.transient(master)
         self.grab_set()
 
         self.game_var = tk.StringVar(value=str(game_id) if game_id is not None else "")
         self.round_var = tk.StringVar()
-        self.paifu_var = tk.StringVar(value=paifu_link or "")
-        self.ai_link_var = tk.StringVar(value=ai_link or "")
-        self.ai_link2_var = tk.StringVar(value=ai_link2 or "")
 
         form = ttk.Frame(self, padding=16)
         form.pack(fill="both", expand=True)
         form.columnconfigure(1, weight=1)
-        form.rowconfigure(5, weight=1)
+        form.rowconfigure(2, weight=1)
 
         ttk.Label(form, text="序号 *").grid(row=0, column=0, sticky="w", pady=6)
         ttk.Entry(form, textvariable=self.game_var).grid(row=0, column=1, sticky="ew", padx=8)
         ttk.Label(form, text="小局 *").grid(row=1, column=0, sticky="w", pady=6)
         ttk.Entry(form, textvariable=self.round_var).grid(row=1, column=1, sticky="ew", padx=8)
-        ttk.Label(form, text="原牌谱链接").grid(row=2, column=0, sticky="w", pady=6)
-        ttk.Entry(form, textvariable=self.paifu_var).grid(row=2, column=1, sticky="ew", padx=8)
-        ttk.Label(form, text="AI 复盘链接").grid(row=3, column=0, sticky="w", pady=6)
-        ttk.Entry(form, textvariable=self.ai_link_var).grid(row=3, column=1, sticky="ew", padx=8)
-        ttk.Label(form, text="参考 AI 复盘链接").grid(row=4, column=0, sticky="w", pady=6)
-        ttk.Entry(form, textvariable=self.ai_link2_var).grid(row=4, column=1, sticky="ew", padx=8)
-        ttk.Label(form, text="疑问点").grid(row=5, column=0, sticky="nw", pady=6)
+        ttk.Label(form, text="疑问点").grid(row=2, column=0, sticky="nw", pady=6)
         self.note_text = tk.Text(form, height=7, wrap="word")
-        self.note_text.grid(row=5, column=1, sticky="nsew", padx=8, pady=6)
+        self.note_text.grid(row=2, column=1, sticky="nsew", padx=8, pady=6)
+        ttk.Label(
+            form,
+            text="原牌谱 / AI 复盘链接将自动带入当前牌谱的链接。",
+            foreground="#888",
+            font=("", 9),
+        ).grid(row=3, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4))
 
         actions = ttk.Frame(self, padding=(16, 0))
-        actions.pack(fill="x", pady=12)
-        ttk.Button(actions, text="保存", command=self.save).pack(side="left")
-        ttk.Button(actions, text="取消", command=self.destroy).pack(side="left", padx=8)
+        actions.pack(fill="x", pady=(0, 12))
+        ttk.Button(actions, text="保存", command=self.save).pack(side="right")
+        ttk.Button(actions, text="取消", command=self.destroy).pack(side="right", padx=8)
 
     def save(self):
         game_id = parse_positive_int(self.game_var.get())
@@ -178,9 +190,9 @@ class QuestionDialog(tk.Toplevel):
             game_id,
             small_round,
             self.note_text.get("1.0", "end").strip(),
-            self.paifu_var.get().strip(),
-            self.ai_link_var.get().strip(),
-            self.ai_link2_var.get().strip(),
+            self._paifu_link,
+            self._ai_link,
+            self._ai_link2,
         )
         if self.on_saved:
             self.on_saved()
@@ -204,8 +216,13 @@ class NewFrame(BaseFrame):
         self.status_var = tk.StringVar(value="带 * 的为必填项。")
         self.game_hint_var = tk.StringVar(value="")
 
-        game_box = ttk.LabelFrame(self, text="牌谱信息（一局可连续添加多道何切）", padding=10)
-        game_box.pack(fill="x")
+        main = ttk.Frame(self)
+        main.pack(fill="both", expand=True)
+        main.columnconfigure(0, weight=1)
+        main.columnconfigure(1, minsize=300)
+
+        game_box = ttk.LabelFrame(main, text="牌谱信息（一局可连续添加多道何切）", padding=10)
+        game_box.grid(row=0, column=0, sticky="ew", padx=(0, 12))
         game_box.columnconfigure(1, weight=1)
         self._add_entry(game_box, 0, "序号 *", self.game_var, hint="对应 xlsx 中的序号")
         self._add_entry(game_box, 1, "原牌谱链接", self.paifu_var, hint="天凤原牌谱链接（选填）")
@@ -217,8 +234,8 @@ class NewFrame(BaseFrame):
         )
         self.game_var.trace_add("write", lambda *_: self._update_game_hint())
 
-        cut_box = ttk.LabelFrame(self, text="何切信息", padding=10)
-        cut_box.pack(fill="x", pady=(12, 0))
+        cut_box = ttk.LabelFrame(main, text="何切信息", padding=10)
+        cut_box.grid(row=1, column=0, sticky="ew", padx=(0, 12), pady=(12, 0))
         cut_box.columnconfigure(1, weight=1)
         self._add_entry(cut_box, 0, "AI 复盘链接 *", self.ai_link_var, hint="主要链接（必填）")
         self._add_entry(cut_box, 1, "参考 AI 复盘链接", self.ai_link2_var, hint="次要链接（选填）")
@@ -229,10 +246,10 @@ class NewFrame(BaseFrame):
         self._add_entry(cut_box, 6, "次要标签", self.tags2_var, hint="次要/辅助标签（选填）")
         self.comment_text = self._add_text(cut_box, 7, "文字解读", height=4)
 
-        tag_box = ttk.LabelFrame(self, text="已有标签（按使用次数排序，双击加到主要标签）", padding=8)
-        tag_box.pack(fill="x", pady=(12, 0))
-        self.tag_list = tk.Listbox(tag_box, height=4, exportselection=False)
-        self.tag_list.pack(side="left", fill="x", expand=True)
+        tag_box = ttk.LabelFrame(main, text="已有标签（按使用次数排序，双击加到主要标签）", padding=8)
+        tag_box.grid(row=0, column=1, rowspan=2, sticky="nsew")
+        self.tag_list = tk.Listbox(tag_box, exportselection=False)
+        self.tag_list.pack(side="left", fill="both", expand=True)
         scroll = ttk.Scrollbar(tag_box, orient="vertical", command=self.tag_list.yview)
         scroll.pack(side="right", fill="y")
         self.tag_list.configure(yscrollcommand=scroll.set)
@@ -246,14 +263,16 @@ class NewFrame(BaseFrame):
         self._refresh_tags()
 
         actions = ttk.Frame(self)
-        actions.pack(fill="x", pady=12)
+        actions.pack(fill="x", pady=(12, 0))
         ttk.Button(actions, text="保存并继续添加", command=self.save).pack(side="left")
         ttk.Button(actions, text="清空何切", command=self.clear_cut).pack(side="left", padx=8)
         ttk.Button(actions, text="清空全部", command=self.clear_all).pack(side="left")
         ttk.Button(actions, text="记录疑问…", command=self.open_question_dialog).pack(
             side="right"
         )
-        ttk.Label(self, textvariable=self.status_var, foreground="#555").pack(anchor="w")
+        ttk.Label(self, textvariable=self.status_var, foreground="#555").pack(
+            anchor="w", pady=(8, 0)
+        )
 
     def _add_entry(self, parent, row, label, var, hint=""):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=6)
@@ -586,7 +605,8 @@ class SearchFrame(BaseFrame):
         ttk.Button(top, text="查找", command=self.search).pack(side="left")
         ttk.Button(top, text="显示全部", command=self.show_all).pack(side="left", padx=6)
         ttk.Label(top, text="匹配：").pack(side="left", padx=(12, 0))
-        self.mode_var = tk.StringVar(value="严格匹配")
+        default_mode = self.storage.get_settings().get("default_match_mode", "strict")
+        self.mode_var = tk.StringVar(value=MODE_LABELS.get(default_mode, "严格匹配"))
         mode_box = ttk.Combobox(
             top,
             textvariable=self.mode_var,
@@ -623,8 +643,17 @@ class SearchFrame(BaseFrame):
 
         right = ttk.LabelFrame(body, text="预览", padding=8)
         right.pack(side="right", fill="both", padx=(12, 0))
-        self.image_label = ttk.Label(right, text="选择左侧题目查看", anchor="center")
-        self.image_label.pack(fill="both", expand=True)
+        img_frame = ttk.Frame(right)
+        img_frame.pack(fill="both", expand=True)
+        self.image_canvas = tk.Canvas(img_frame, bg="#f5f5f5", highlightthickness=0)
+        self.image_canvas.pack(side="left", fill="both", expand=True)
+        img_vbar = ttk.Scrollbar(img_frame, orient="vertical", command=self.image_canvas.yview)
+        img_vbar.pack(side="right", fill="y")
+        self.image_canvas.configure(yscrollcommand=img_vbar.set)
+        img_hbar = ttk.Scrollbar(right, orient="horizontal", command=self.image_canvas.xview)
+        img_hbar.pack(side="bottom", fill="x")
+        self.image_canvas.configure(xscrollcommand=img_hbar.set)
+        self.image_canvas.bind("<Configure>", self._on_canvas_resize)
         self.info_var = tk.StringVar(value="")
         ttk.Label(right, textvariable=self.info_var, justify="left", wraplength=380).pack(
             anchor="w", pady=6
@@ -676,10 +705,10 @@ class SearchFrame(BaseFrame):
                 ),
             )
             self._scenes[iid] = scene
-        self.image_label.configure(image="", text="选择左侧题目查看")
-        self.image_label.image = None
         self._current = None
+        self._current_path = None
         self.info_var.set("")
+        self._reset_canvas()
 
     def show_all(self):
         self.query_var.set("")
@@ -720,14 +749,8 @@ class SearchFrame(BaseFrame):
                 if candidate is not None:
                     path, kind, self._view = candidate, label, key
                     break
-        photo = load_photo(path, MAX_IMAGE)
-        self._photo = photo
-        if photo is not None:
-            self.image_label.configure(image=photo, text="")
-            self.image_label.image = photo
-        else:
-            self.image_label.configure(image="", text="（无可用截图）")
-            self.image_label.image = None
+        self._current_path = path
+        self._draw_image()
         info = (
             f"{scene.title}\n主要标签：{', '.join(scene.tags)}\n"
             f"次要标签：{', '.join(scene.tags2) or '（无）'}\n"
@@ -736,6 +759,35 @@ class SearchFrame(BaseFrame):
         if scene.comment:
             info += f"\n文字解读：{scene.comment}"
         self.info_var.set(info)
+
+    def _reset_canvas(self):
+        self.image_canvas.delete("all")
+        self.image_canvas.configure(scrollregion=(0, 0, 0, 0))
+        self.image_canvas.create_text(
+            160, 80, text="选择左侧题目查看", fill="#888"
+        )
+
+    def _draw_image(self):
+        canvas = self.image_canvas
+        canvas.delete("all")
+        path = getattr(self, "_current_path", None)
+        if not path:
+            canvas.create_text(160, 80, text="（无可用截图）", fill="#888")
+            return
+        width = canvas.winfo_width()
+        if width < 60:
+            width = 640
+        photo = load_photo(path, (width - 4, 100000))
+        self._photo = photo
+        if photo is None:
+            canvas.create_text(160, 80, text="（无法加载图片）", fill="#888")
+            return
+        canvas.create_image(0, 0, anchor="nw", image=photo)
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+    def _on_canvas_resize(self, _event):
+        if getattr(self, "_current", None) is not None:
+            self._draw_image()
 
     def open_ai_link(self):
         if self._current:
@@ -957,26 +1009,36 @@ class TagManagerFrame(BaseFrame):
         body.pack(fill="both", expand=True)
 
         left = ttk.LabelFrame(body, text="标签列表（按使用次数排序，可多选）", padding=8)
-        left.pack(side="left", fill="both", expand=True)
-        self.listbox = tk.Listbox(left, exportselection=False, selectmode="extended")
+        left.pack(side="left", fill="y")
+        self.listbox = tk.Listbox(left, exportselection=False, selectmode="extended", width=28)
         self.listbox.pack(side="left", fill="both", expand=True)
         scroll = ttk.Scrollbar(left, orient="vertical", command=self.listbox.yview)
         scroll.pack(side="right", fill="y")
         self.listbox.configure(yscrollcommand=scroll.set)
         self.listbox.bind("<<ListboxSelect>>", self._on_select)
 
-        right = ttk.LabelFrame(body, text="操作", padding=8)
-        right.pack(side="right", fill="y", padx=(12, 0))
-        ttk.Label(right, text="标签名：").pack(anchor="w")
+        right = ttk.LabelFrame(body, text="操作", padding=16)
+        right.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        inner = ttk.Frame(right)
+        inner.pack(anchor="n", fill="x")
+        ttk.Label(inner, text="标签名：").pack(anchor="w")
         self.entry_var = tk.StringVar()
-        ttk.Entry(right, textvariable=self.entry_var, width=24).pack(fill="x", pady=6)
-        ttk.Button(right, text="添加", command=self.add_tag).pack(fill="x", pady=2)
-        ttk.Button(right, text="重命名为输入框内容", command=self.rename_tag).pack(fill="x", pady=2)
-        ttk.Button(right, text="删除选中标签", command=self.delete_tag).pack(fill="x", pady=2)
-        ttk.Button(right, text="合并选中标签…", command=self.merge_tags).pack(fill="x", pady=2)
-        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=8)
+        ttk.Entry(inner, textvariable=self.entry_var, width=32).pack(fill="x", pady=6)
+        ttk.Button(inner, text="添加标签", command=self.add_tag).pack(fill="x", pady=3)
+        ttk.Button(inner, text="重命名为输入框内容", command=self.rename_tag).pack(fill="x", pady=3)
+        ttk.Button(inner, text="删除选中标签", command=self.delete_tag).pack(fill="x", pady=3)
+        ttk.Button(inner, text="合并选中标签…", command=self.merge_tags).pack(fill="x", pady=3)
+        ttk.Separator(inner, orient="horizontal").pack(fill="x", pady=10)
         self.count_var = tk.StringVar()
-        ttk.Label(right, textvariable=self.count_var, justify="left", wraplength=240).pack(anchor="w")
+        ttk.Label(inner, textvariable=self.count_var, justify="left", wraplength=280).pack(
+            anchor="w"
+        )
+        ttk.Label(
+            inner,
+            text="提示：可按住 Ctrl / Shift 多选，再删除或合并。",
+            foreground="#888",
+            font=("", 9),
+        ).pack(anchor="w", pady=(10, 0))
 
         self.refresh()
 
@@ -1237,35 +1299,138 @@ class QuestionFrame(BaseFrame):
         self.status_var.set("带 * 的为必填项。")
 
 
+class ImportDialog(tk.Toplevel):
+    """选择要导入的何切与疑问（默认全选）。"""
+
+    def __init__(self, master, storage: Storage, manifest: dict):
+        super().__init__(master)
+        self.storage = storage
+        self.manifest = manifest
+        self.result = None
+        self._scenes = sorted(
+            manifest.get("scenes", []),
+            key=lambda item: int(item.get("cut_id", 0) or 0),
+        )
+        self._questions = manifest.get("questions", [])
+        self.title("选择要导入的内容")
+        self.geometry("560x560")
+        self.transient(master)
+        self.grab_set()
+
+        top = ttk.Frame(self, padding=16)
+        top.pack(fill="x")
+        ttk.Label(top, text="目标序号 *").pack(side="left")
+        self.game_var = tk.StringVar(value=str(manifest.get("game_id", "")))
+        ttk.Entry(top, textvariable=self.game_var, width=14).pack(side="left", padx=8)
+
+        body = ttk.Frame(self, padding=(16, 0))
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(1, weight=1)
+        body.rowconfigure(3, weight=1)
+
+        ttk.Label(body, text=f"何切记录（{len(self._scenes)}）").grid(
+            row=0, column=0, sticky="w", pady=(0, 4)
+        )
+        self.scene_list = tk.Listbox(body, selectmode="extended", exportselection=False)
+        self.scene_list.grid(row=1, column=0, sticky="nsew")
+        for scene in self._scenes:
+            self.scene_list.insert(
+                "end", f"#{scene.get('cut_id')}  主要标签：{', '.join(scene.get('tags', []))}"
+            )
+
+        ttk.Label(body, text=f"疑问小局（{len(self._questions)}）").grid(
+            row=2, column=0, sticky="w", pady=(12, 4)
+        )
+        self.question_list = tk.Listbox(body, selectmode="extended", exportselection=False)
+        self.question_list.grid(row=3, column=0, sticky="nsew")
+        for question in self._questions:
+            self.question_list.insert(
+                "end", f"{question.get('small_round', '')}　{question.get('note', '')}"
+            )
+
+        buttons = ttk.Frame(self, padding=16)
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="全选", command=self.select_all).pack(side="left")
+        ttk.Button(buttons, text="全不选", command=self.select_none).pack(side="left", padx=8)
+        ttk.Button(buttons, text="导入", command=self.confirm).pack(side="right")
+        ttk.Button(buttons, text="取消", command=self.destroy).pack(side="right", padx=8)
+
+        self.select_all()
+
+    def _set_all(self, listbox, selected: bool):
+        listbox.selection_clear(0, "end")
+        if selected:
+            listbox.selection_set(0, "end")
+
+    def select_all(self):
+        self._set_all(self.scene_list, True)
+        self._set_all(self.question_list, True)
+
+    def select_none(self):
+        self._set_all(self.scene_list, False)
+        self._set_all(self.question_list, False)
+
+    def confirm(self):
+        game_id = parse_positive_int(self.game_var.get())
+        if game_id is None:
+            messagebox.showwarning("提示", "序号必须是正整数。", parent=self)
+            return
+        scene_ids = [int(self._scenes[i].get("cut_id", 0) or 0) for i in self.scene_list.curselection()]
+        question_indices = list(self.question_list.curselection())
+        if not scene_ids and not question_indices:
+            messagebox.showwarning("提示", "请至少选择一项要导入的内容。", parent=self)
+            return
+        self.result = (game_id, scene_ids, question_indices)
+        self.destroy()
+
+
 class ExportFrame(BaseFrame):
     def __init__(self, master, app):
         super().__init__(master, app)
-        self.header("导出牌谱")
+        self.header("导出 / 导入")
         self.status_var = tk.StringVar(value="输入序号，选择格式后点“生成…”。")
 
-        form = ttk.Frame(self)
-        form.pack(fill="x", pady=(10, 0))
-        ttk.Label(form, text="序号 *").pack(side="left")
+        wrap = ttk.Frame(self)
+        wrap.pack(expand=True)
+
+        box = ttk.LabelFrame(wrap, text="导出设置", padding=24)
+        box.pack()
+
+        form = ttk.Frame(box)
+        form.pack(fill="x")
+        form.columnconfigure(1, weight=1)
+
+        ttk.Label(form, text="序号 *").grid(row=0, column=0, sticky="w", pady=8)
         self.game_var = tk.StringVar()
-        ttk.Entry(form, textvariable=self.game_var, width=12).pack(side="left", padx=6)
-        ttk.Label(form, text="格式：").pack(side="left", padx=(16, 0))
-        self.format_var = tk.StringVar(value="长图 (PNG)")
+        ttk.Entry(form, textvariable=self.game_var, width=16).grid(
+            row=0, column=1, sticky="w", padx=12
+        )
+
+        ttk.Label(form, text="格式").grid(row=1, column=0, sticky="w", pady=8)
+        default_fmt = self.storage.get_settings().get("default_export_format", "png")
+        self.format_var = tk.StringVar(value=EXPORT_FORMAT_LABELS.get(default_fmt, "长图 (PNG)"))
         ttk.Combobox(
             form,
             textvariable=self.format_var,
             width=14,
             state="readonly",
-            values=["长图 (PNG)", "PDF"],
-        ).pack(side="left")
-        ttk.Button(form, text="生成…", command=self.generate).pack(side="left", padx=12)
+            values=list(EXPORT_FORMAT_KEYS.keys()),
+        ).grid(row=1, column=1, sticky="w", padx=12)
+
+        ttk.Button(box, text="生成…", command=self.generate).pack(fill="x", pady=(12, 0))
+        ttk.Button(box, text="导入 ZIP…", command=self.import_zip).pack(fill="x", pady=(8, 0))
 
         ttk.Label(
-            self,
-            text="内容：该序号下所有何切记录（图片+文字解读），以及所有疑问小局与疑问点。",
+            box,
+            text="内容：该序号下所有何切记录（图片 + 文字解读），以及所有疑问小局与疑问点。"
+            "「打包 (ZIP)」可连同照片一起分享；「导入 ZIP…」可把别人分享的牌谱收入本机。",
             foreground="#888",
+            wraplength=420,
+            justify="left",
         ).pack(anchor="w", pady=(16, 0))
-        ttk.Label(self, textvariable=self.status_var, foreground="#555", wraplength=900).pack(
-            anchor="w", pady=12
+        ttk.Label(box, textvariable=self.status_var, foreground="#555", wraplength=420).pack(
+            anchor="w", pady=10
         )
 
     def generate(self):
@@ -1274,16 +1439,19 @@ class ExportFrame(BaseFrame):
             messagebox.showwarning("提示", "序号必须是正整数。")
             return
         label = self.format_var.get()
-        fmt = {"长图 (PNG)": "png", "PDF": "pdf"}[label]
-        ext = {"png": ".png", "pdf": ".pdf"}[fmt]
+        fmt = EXPORT_FORMAT_KEYS.get(label, "png")
+        ext = {"png": ".png", "pdf": ".pdf", "zip": ".zip"}[fmt]
         scenes = [s for s in self.storage.list_scenes() if s.game_id == game_id]
         questions = [q for q in self.storage.list_questions() if q.game_id == game_id]
         if not scenes and not questions:
             messagebox.showinfo("提示", f"牌谱 #{game_id} 没有何切记录或疑问记录。")
             return
+        default_dir = self.storage.get_settings().get("default_export_dir", "") or str(
+            self.storage.base_dir
+        )
         path = filedialog.asksaveasfilename(
             title="保存导出文件",
-            initialdir=str(self.storage.base_dir),
+            initialdir=default_dir,
             initialfile=f"牌谱_{game_id}{ext}",
             defaultextension=ext,
             filetypes=[(label, f"*{ext}"), ("所有文件", "*.*")],
@@ -1298,14 +1466,126 @@ class ExportFrame(BaseFrame):
         self.status_var.set(f"已导出：{path}")
         messagebox.showinfo("完成", f"已导出到：\n{path}")
 
+    def import_zip(self):
+        path = filedialog.askopenfilename(
+            title="选择要导入的 ZIP 文件",
+            filetypes=[("ZIP 打包", "*.zip"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+        manifest = peek_zip_manifest(path)
+        if not isinstance(manifest, dict):
+            messagebox.showerror("导入失败", "无法读取 ZIP 中的清单文件（manifest.json）。")
+            return
+        dialog = ImportDialog(self, self.storage, manifest)
+        self.wait_window(dialog)
+        result = dialog.result
+        if result is None:
+            return
+        game_id, scene_ids, question_indices = result
+        try:
+            scene_count, question_count = import_zip(
+                self.storage, path, game_id, scene_ids, question_indices
+            )
+        except Exception as exc:  # noqa: BLE001 - 导入失败原因多样，统一提示
+            messagebox.showerror("导入失败", str(exc))
+            return
+        self.status_var.set(
+            f"已导入 {scene_count} 道何切、{question_count} 条疑问到 #{game_id}。"
+        )
+        messagebox.showinfo(
+            "完成", f"已导入 {scene_count} 道何切、{question_count} 条疑问到 #{game_id}。"
+        )
+
+
+class SettingsFrame(BaseFrame):
+    def __init__(self, master, app):
+        super().__init__(master, app)
+        self.header("设置")
+        self.status_var = tk.StringVar(value="")
+        settings = self.storage.get_settings()
+
+        wrap = ttk.Frame(self)
+        wrap.pack(expand=True)
+        box = ttk.LabelFrame(wrap, text="偏好设置", padding=24)
+        box.pack()
+
+        form = ttk.Frame(box)
+        form.pack(fill="x")
+        form.columnconfigure(1, weight=1)
+
+        ttk.Label(form, text="默认导出格式").grid(row=0, column=0, sticky="w", pady=8)
+        self.format_var = tk.StringVar(
+            value=EXPORT_FORMAT_LABELS.get(settings.get("default_export_format", "png"), "长图 (PNG)")
+        )
+        ttk.Combobox(
+            form,
+            textvariable=self.format_var,
+            width=16,
+            state="readonly",
+            values=list(EXPORT_FORMAT_KEYS.keys()),
+        ).grid(row=0, column=1, sticky="w", padx=12)
+
+        ttk.Label(form, text="默认导出目录").grid(row=1, column=0, sticky="w", pady=8)
+        dir_row = ttk.Frame(form)
+        dir_row.grid(row=1, column=1, sticky="ew", padx=12)
+        self.dir_var = tk.StringVar(
+            value=settings.get("default_export_dir", "") or str(self.storage.base_dir)
+        )
+        ttk.Entry(dir_row, textvariable=self.dir_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(dir_row, text="选择…", command=self._pick_dir).pack(side="left", padx=6)
+
+        ttk.Label(form, text="默认匹配方式").grid(row=2, column=0, sticky="w", pady=8)
+        self.mode_var = tk.StringVar(
+            value=MODE_LABELS.get(settings.get("default_match_mode", "strict"), "严格匹配")
+        )
+        ttk.Combobox(
+            form,
+            textvariable=self.mode_var,
+            width=16,
+            state="readonly",
+            values=list(MODE_KEYS.keys()),
+        ).grid(row=2, column=1, sticky="w", padx=12)
+
+        ttk.Separator(box, orient="horizontal").pack(fill="x", pady=12)
+        ttk.Label(
+            box,
+            text=f"数据目录（只读）：{self.storage.files_dir}",
+            foreground="#888",
+            wraplength=460,
+            justify="left",
+        ).pack(anchor="w")
+        ttk.Label(box, textvariable=self.status_var, foreground="#2a7", wraplength=460).pack(
+            anchor="w", pady=(10, 0)
+        )
+        ttk.Button(box, text="保存设置", command=self.save).pack(fill="x", pady=(16, 0))
+
+    def _pick_dir(self):
+        chosen = filedialog.askdirectory(
+            title="选择默认导出目录",
+            initialdir=self.dir_var.get() or str(self.storage.base_dir),
+        )
+        if chosen:
+            self.dir_var.set(chosen)
+
+    def save(self):
+        self.storage.set_settings(
+            {
+                "default_export_format": EXPORT_FORMAT_KEYS.get(self.format_var.get(), "png"),
+                "default_export_dir": self.dir_var.get().strip(),
+                "default_match_mode": MODE_KEYS.get(self.mode_var.get(), "strict"),
+            }
+        )
+        self.status_var.set("已保存设置。")
+
 
 class App(tk.Tk):
     def __init__(self, storage: Storage | None = None):
         super().__init__()
         self.storage = storage or Storage()
         self.title("LuckyJ Manager")
-        self.geometry("1120x780")
-        self.minsize(900, 640)
+        self.geometry("1280x720")
+        self.minsize(940, 680)
         self.container = ttk.Frame(self)
         self.container.pack(fill="both", expand=True)
         self.show_home()
@@ -1336,3 +1616,6 @@ class App(tk.Tk):
 
     def show_export(self):
         self._swap(ExportFrame)
+
+    def show_settings(self):
+        self._swap(SettingsFrame)
