@@ -1394,10 +1394,10 @@ class ExportFrame(BaseFrame):
         wrap = ttk.Frame(self)
         wrap.pack(expand=True)
 
-        box = ttk.LabelFrame(wrap, text="导出设置", padding=24)
-        box.pack()
+        export_box = ttk.LabelFrame(wrap, text="导出", padding=24)
+        export_box.pack(fill="x")
 
-        form = ttk.Frame(box)
+        form = ttk.Frame(export_box)
         form.pack(fill="x")
         form.columnconfigure(1, weight=1)
 
@@ -1418,19 +1418,30 @@ class ExportFrame(BaseFrame):
             values=list(EXPORT_FORMAT_KEYS.keys()),
         ).grid(row=1, column=1, sticky="w", padx=12)
 
-        ttk.Button(box, text="生成…", command=self.generate).pack(fill="x", pady=(12, 0))
-        ttk.Button(box, text="导入 ZIP…", command=self.import_zip).pack(fill="x", pady=(8, 0))
-
+        ttk.Button(export_box, text="生成…", command=self.generate).pack(fill="x", pady=(12, 0))
         ttk.Label(
-            box,
-            text="内容：该序号下所有何切记录（图片 + 文字解读），以及所有疑问小局与疑问点。"
-            "「打包 (ZIP)」可连同照片一起分享；「导入 ZIP…」可把别人分享的牌谱收入本机。",
+            export_box,
+            text="内容：该序号下所有何切记录（图片 + 文字解读），以及所有疑问小局与疑问点。",
             foreground="#888",
             wraplength=420,
             justify="left",
-        ).pack(anchor="w", pady=(16, 0))
-        ttk.Label(box, textvariable=self.status_var, foreground="#555", wraplength=420).pack(
-            anchor="w", pady=10
+        ).pack(anchor="w", pady=(12, 0))
+
+        import_box = ttk.LabelFrame(wrap, text="导入", padding=24)
+        import_box.pack(fill="x", pady=(12, 0))
+        ttk.Label(
+            import_box,
+            text="选择他人分享的 ZIP 文件，把其中的何切与疑问收入本机。",
+            foreground="#888",
+            wraplength=420,
+            justify="left",
+        ).pack(anchor="w")
+        ttk.Button(import_box, text="导入 ZIP…", command=self.import_zip).pack(
+            fill="x", pady=(8, 0)
+        )
+
+        ttk.Label(self, textvariable=self.status_var, foreground="#555", wraplength=420).pack(
+            anchor="w", pady=(12, 0)
         )
 
     def generate(self):
